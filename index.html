@@ -1065,6 +1065,71 @@ const LOCAL_KEY = 'fy_local_mode';
    this device (Supabase anonymous sign-in). Every client, week and post
    is stored in Supabase under that account, protected by RLS and
    included in the nightly backups. Nothing is kept only in the browser. */
+/* ============================================================
+   DEVICE-ACCOUNT GUARDRAILS
+   A device account only works if this browser can remember its sign-in.
+   If it cannot, creating an account just orphans the data, so we stop and
+   say why instead of silently making a new empty account on every load.
+     1. Preview / embedded frame   -> ask to open the real address
+     2. Storage blocked / private  -> do not create an account
+     3. Had an account, login gone -> never replace it silently
+     4. 2+ new accounts in 10 min  -> stop the loop
+     5. One sign-in at a time, and a request for persistent storage
+============================================================ */
+const GUARD_MARKER='fy_device_uid', GUARD_LOG='fy_anon_log', GUARD_WINDOW_MS=10*60*1000, GUARD_MAX_NEW=2;
+function guardStorageOK(){
+  try{ const k='__fy_probe'; localStorage.setItem(k,'1'); const ok=localStorage.getItem(k)==='1'; localStorage.removeItem(k); return ok; }
+  catch(e){ return false; }
+}
+function guardInFrame(){ try{ return window.self!==window.top; }catch(e){ return true; } }
+function guardRecent(){
+  try{ return JSON.parse(localStorage.getItem(GUARD_LOG)||'[]').filter(t=>Date.now()-t<GUARD_WINDOW_MS); }catch(e){ return []; }
+}
+function guardRecord(uid){
+  try{
+    const l=guardRecent(); l.push(Date.now()); localStorage.setItem(GUARD_LOG, JSON.stringify(l));
+    if (uid) localStorage.setItem(GUARD_MARKER, uid);
+  }catch(e){}
+}
+function guardRemember(uid){ try{ if(uid) localStorage.setItem(GUARD_MARKER, uid); }catch(e){} }
+function guardClear(){ try{ localStorage.removeItem(GUARD_MARKER); localStorage.removeItem(GUARD_LOG); }catch(e){} }
+
+const GUARD_TEXT={
+  frame:{ title:'Open the site in its own tab',
+    body:'You are viewing this page inside a preview window. A preview cannot keep your sign-in, so anything you add here would be lost. No account was created.',
+    primary:['Open in a new tab','fyGuardOpenTab()'] },
+  nostorage:{ title:'This browser is blocking site storage',
+    body:'Private / incognito mode or a storage-blocking setting stops the page remembering your device account. Nothing was created, so no empty accounts pile up. Open the site in a normal window (not private), allow cookies and site data for this address, then try again.',
+    primary:['Try again','fyGuardRetry()'] },
+  lost:{ title:'This browser lost its sign-in',
+    body:'This browser had a device account, but its sign-in is gone (site data was cleared or expired). Your earlier data is still safe in the database. If you attached an email to that account, sign in with it. Starting a new workspace gives you an empty one.',
+    primary:['Sign in with email','fyGuardEmail()'], secondary:['Start a new empty workspace','fyGuardNew()'] },
+  loop:{ title:'Too many new accounts from this browser',
+    body:'This browser created two new device accounts in the last 10 minutes, which means it is not remembering them. I stopped before making another. Check that the browser allows site storage, then try again.',
+    primary:['Try again','fyGuardRetry()'], secondary:['Create one anyway','fyGuardNew()'] }
+};
+function showGuard(kind, extra){
+  const t=GUARD_TEXT[kind]; if(!t) return;
+  let g=document.getElementById('fy-guard');
+  if(!g){ g=document.createElement('div'); g.id='fy-guard';
+    g.style.cssText='position:fixed;inset:0;z-index:300;background:var(--bg);display:flex;align-items:center;justify-content:center;padding:20px;overflow-y:auto';
+    document.body.appendChild(g); }
+  g.innerHTML='<div class="card" style="max-width:460px;width:100%">'+
+    '<div class="card-title" style="font-size:18px;margin-bottom:10px">'+esc(t.title)+'</div>'+
+    '<p style="font-size:13px;color:var(--text2);line-height:1.6;margin-bottom:16px">'+esc(t.body)+(extra?' '+esc(extra):'')+'</p>'+
+    '<div style="display:flex;gap:10px;flex-wrap:wrap">'+
+    '<button class="btn btn-primary" onclick="'+t.primary[1]+'">'+esc(t.primary[0])+'</button>'+
+    (t.secondary?'<button class="btn btn-ghost" onclick="'+t.secondary[1]+'">'+esc(t.secondary[0])+'</button>':'')+
+    '</div></div>';
+  g.style.display='flex';
+  window.FY_GUARD=kind;
+}
+function hideGuard(){ const g=document.getElementById('fy-guard'); if(g) g.style.display='none'; window.FY_GUARD=null; }
+function fyGuardOpenTab(){ window.open(location.href,'_blank','noopener'); }
+function fyGuardRetry(){ location.reload(); }
+function fyGuardEmail(){ hideGuard(); const ls=document.getElementById('login-screen'); if(ls){ ls.style.display='flex'; ls.style.opacity='1'; } }
+function fyGuardNew(){ window.__FY_FORCE_NEW=true; try{ localStorage.removeItem(GUARD_MARKER); }catch(e){} hideGuard(); startLocalMode(); }
+
 let ANON_BUSY=null;
 async function startLocalMode(){
   if (ANON_BUSY) return ANON_BUSY;
@@ -1073,14 +1138,26 @@ async function startLocalMode(){
 }
 async function startLocalMode_(){
   LOCAL_MODE = false;
-  localStorage.setItem(LOCAL_KEY, '1');
   if (!sb){ deviceAccountFailed('The database library did not load. Check your connection and reload.'); return; }
+  const force=!!window.__FY_FORCE_NEW; window.__FY_FORCE_NEW=false;
+  /* guard 1 + 2: this page must be able to remember its login */
+  if (guardInFrame()){ showGuard('frame'); return; }
+  if (!guardStorageOK()){ showGuard('nostorage'); return; }
+  try{ if (navigator.storage && navigator.storage.persist) navigator.storage.persist(); }catch(e){}
+  localStorage.setItem(LOCAL_KEY, '1');
   try{
     const cur=await sb.auth.getSession();
-    if (cur.data && cur.data.session){ SESSION=cur.data.session; launchApp(); return; }
+    if (cur.data && cur.data.session){
+      SESSION=cur.data.session; guardRemember(SESSION.user && SESSION.user.id); launchApp(); return;
+    }
+    /* guard 3: had an account here, now no session -> never replace it silently */
+    if (!force && localStorage.getItem(GUARD_MARKER)){ showGuard('lost'); return; }
+    /* guard 4: stop a create-account loop */
+    if (!force && guardRecent().length>=GUARD_MAX_NEW){ showGuard('loop'); return; }
     const r=await sb.auth.signInAnonymously();
     if (r.error) throw r.error;
     SESSION=r.data.session;
+    guardRecord(SESSION.user && SESSION.user.id);
     logEvent('device_account_created',{});
     launchApp();
   }catch(e){ deviceAccountFailed(e.message||String(e)); }
@@ -1126,6 +1203,7 @@ async function signOut(){
   SESSION=null;
   localStorage.removeItem('fy_stay');
   localStorage.removeItem(LOCAL_KEY);
+  guardClear();
   location.reload();
 }
 
