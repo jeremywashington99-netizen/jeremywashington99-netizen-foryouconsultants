@@ -1595,8 +1595,11 @@ const Stat = {
 };
 
 /* ============================================================
-   DEEP LEARNING  -  TensorFlow.js
-   Two heads sharing an engineered feature vector:
+   DEEP LEARNING  -  trained in Supabase, read here with TensorFlow.js
+   Two heads sharing an engineered feature vector. They are TRAINED by the
+   Supabase edge function train-net (js/net-core.js + js/mini-mlp.js) and
+   saved to public.model_runs; this page loads the saved weights into
+   TensorFlow.js only to predict and to draw the charts.
 
    Activation policy: every hidden layer is ReLU (uniform, fast
    training, good gradient flow); each output layer matches its
@@ -1617,7 +1620,7 @@ const Stat = {
    Sequential (RNN), image (CNN) and generative (GAN) models live
    in js/dl-rnn.js, js/dl-cnn.js and js/dl-gan.js (Deep Learning Lab).
 
-   Optimiser Adam, loss MSE (regression) / categoricalCrossentropy
+   Optimiser Adam, loss MSE (regression) / categorical cross-entropy
    (classifier). Weights and biases are inspectable via
    model.getWeights() and rendered in the AI Insights view.
 ============================================================ */
@@ -1637,197 +1640,13 @@ const NET = {
   lastFit:{ actual:[], predicted:[], labels:[] },
   classScores:{},
 
-  /* Feature vector for week i of a platform series.
-     7 inputs, all scaled into 0..1 so activations behave. */
-  features(s, i, norms){
-    const prevER  = i>0 ? s.er[i-1] : s.er[0];
-    const prevER2 = i>1 ? s.er[i-2] : prevER;
-    /* running maximum: only weeks up to i, so no future week leaks in (guardrail 5) */
-    const postRate = s.posts[i] / Math.max(1, Math.max.apply(null, s.posts.slice(0, i+1)));
-    const paidShare = s.paid[i] > 0 ? 1 : 0;
-    const saveRate = s.saves[i] / Math.max(1, s.reach[i]) * 100;
-    return [
-      norms.er.norm(s.er[i]),            /* this week's engagement (the week being predicted FROM) */
-      norms.er.norm(prevER),             /* lag-1 engagement */
-      norms.er.norm(prevER2),            /* lag-2 engagement */
-      norms.fol.norm(s.followers[i]),    /* audience size */
-      postRate,                          /* posting cadence */
-      paidShare,                         /* paid boost flag */
-      Math.min(1, saveRate/5)            /* save rate signal */
-    ];
-  },
+  /* The inputs are defined once, in js/net-core.js, so what the server trained on and what the page feeds a restored
+     model can never drift apart. */
+  features(s, i, norms){ return FYNetCore.features(s, i, norms); },
 
-  buildRegressor(){
-    /* Small on purpose: a few dozen weekly examples cannot support a big network without it memorising them.
-       L2 weight penalty + 25% dropout + a modest learning rate keep it learning patterns. Hidden layers stay ReLU. */
-    const reg=()=>tf.regularizers.l2({l2:0.004});
-    const m=tf.sequential();
-    m.add(tf.layers.dense({units:24, activation:'relu',     inputShape:[7], kernelInitializer:'heNormal', kernelRegularizer:reg(), useBias:true, name:'dense_relu_24'}));
-    m.add(tf.layers.dropout({rate:0.15, name:'dropout_15'}));
-    m.add(tf.layers.dense({units:12, activation:'relu',     kernelInitializer:'heNormal', kernelRegularizer:reg(), useBias:true, name:'dense_relu_12'}));
-    m.add(tf.layers.dense({units:1,  activation:'linear',   kernelInitializer:'glorotNormal', useBias:true, name:'linear_out'}));
-    m.compile({optimizer:tf.train.adam(0.008), loss:'meanSquaredError', metrics:['mse']});
-    return m;
-  },
-
-  buildClassifier(nClasses){
-    const m=tf.sequential();
-    m.add(tf.layers.dense({units:24, activation:'relu', inputShape:[7], kernelInitializer:'heNormal', useBias:true, name:'clf_relu_24'}));
-    m.add(tf.layers.dense({units:16, activation:'relu', kernelInitializer:'heNormal', useBias:true, name:'clf_relu_16'}));
-    m.add(tf.layers.dense({units:nClasses, activation:'softmax', kernelInitializer:'glorotNormal', useBias:true, name:'softmax_out'}));
-    m.compile({optimizer:tf.train.adam(0.02), loss:'categoricalCrossentropy', metrics:['accuracy']});
-    return m;
-  },
-
-  /* Train on every platform series of the active client */
-  async train(client, onEpoch){
-    if (this.training) return;
-    this.training=true; this.trained=false; this.lossHistory=[];
-    try{ await tf.ready(); }catch(e){}
-    this.metrics.backend = (tf.getBackend && tf.getBackend()) || 'cpu';
-
-    const X=[], Y=[], XC=[], YC=[], TAG=[];
-    const platNorms={};
-    const G=(typeof FYGuard!=='undefined')?FYGuard:null;
-    const dataIssues={issues:[],bad:{},count:0}; let leak={ok:true,leaks:[]};
-
-    client.platforms.forEach(pk=>{
-      const s=client.series[pk]; if(!s) return;
-      const norms={ er:Stat.minmax(s.er), fol:Stat.minmax(s.followers), reach:Stat.minmax(s.reach) };
-      platNorms[pk]=norms;
-      /* guardrails 4 + 5: skip impossible/missing weeks, and prove week i never sees week i+1 */
-      const vs=G?G.validateSeries(s):{issues:[],bad:{}};
-      vs.issues.forEach(x=>dataIssues.issues.push(Object.assign({platform:pk},x)));
-      if (G){ const lp=G.leakProbe((q,i,n)=>this.features(q,i,n), s, norms); if(!lp.ok){ leak.ok=false; leak.leaks=leak.leaks.concat(lp.leaks); } }
-      /* supervised pairs: features(week i) -> engagement(week i+1) */
-      for(let i=0;i<s.er.length-1;i++){
-        if (vs.bad[i]||vs.bad[i+1]) continue;
-        const f=this.features(s,i,norms), y=norms.er.norm(s.er[i+1]);
-        if (!f.every(Number.isFinite) || !Number.isFinite(y)) continue;
-        X.push(f); Y.push([y]); TAG.push({pk:pk,i:i});
-      }
-      /* classifier: logged posts give (features, content class) pairs */
-      (client.posts_log||[]).filter(p=>p.platform===pk).forEach((p,idx)=>{
-        let wi=s.er.length-1;
-        if (p.posted_at && s.dates){
-          const pd=String(p.posted_at).slice(0,10);
-          for(let q=0;q<s.dates.length;q++){ if(s.dates[q]>=pd){ wi=q; break; } }
-        }
-        const oh=new Array(CONTENT_CLASSES.length).fill(0);
-        oh[p.cls]=1;
-        XC.push(this.features(s,wi,norms)); YC.push(oh);
-      });
-    });
-
-    if (X.length<3){ this.training=false; throw new Error('Not enough data to train'); }
-
-    if (this.reg) this.reg.dispose();
-    if (this.clf) this.clf.dispose();
-    this.reg=this.buildRegressor();
-    this.clf=this.buildClassifier(CONTENT_CLASSES.length);
-
-    /* guardrail 9, acted on: if recent weeks sit away from older ones, the newest weeks are counted twice while learning */
-    let driftState='unknown';
-    try{ const pk0=client.primary&&client.series[client.primary]?client.primary:client.platforms[0]; driftState=G?G.drift(client.series[pk0]).state:'unknown'; }catch(e){}
-    const emph=(driftState==='shifted'||driftState==='moving');
-    const recentIdx=[]; if (emph){ const per={}; TAG.forEach((t,k)=>{ (per[t.pk]=per[t.pk]||[]).push(k); }); Object.keys(per).forEach(pk=>per[pk].slice(-6).forEach(k=>recentIdx.push(k))); }
-    this.recencyWeighted=emph;
-    const xs=tf.tensor2d(X.concat(recentIdx.map(k=>X[k]))), ys=tf.tensor2d(Y.concat(recentIdx.map(k=>Y[k])));
-    const EPOCHS = X.length<8 ? 300 : 220;
-    /* guardrails 1 + 5: when there are enough examples, hold back the NEWEST weeks of each platform (never shuffled in) */
-    let holdErr=null, trainErr=null, holdN=0;
-    let bestVal=Infinity, sinceBest=0, bestW=null;
-    const cb=(watchVal, record=true)=>({ onEpochEnd:(e,logs)=>{
-      if (record) this.lossHistory.push(logs.loss);     /* the curve shown/checked is the main learning run only */
-      if (watchVal && logs.val_loss!=null){            /* early stopping, keeping the weights from the best held-back moment */
-        if (logs.val_loss<bestVal-1e-6){ bestVal=logs.val_loss; sinceBest=0; if(bestW) bestW.forEach(w=>w.dispose()); bestW=this.reg.getWeights().map(w=>w.clone()); }
-        else if (++sinceBest>=50) this.reg.stopTraining=true;
-      }
-      if (onEpoch && e%10===0) onEpoch(e, EPOCHS, logs.loss);
-      if (!Number.isFinite(logs.loss)) this.reg.stopTraining=true;   /* guardrail 7: halt if numbers go invalid */
-    }});
-    const plainFit=()=>this.reg.fit(xs, ys, { epochs:EPOCHS, batchSize:8, shuffle:true, verbose:0, callbacks:[cb()] });
-    if (G && X.length>=G.MIN_FOR_HOLDOUT){
-      const trIdx=[], hoIdx=[];
-      const byPk={}; TAG.forEach((t,k)=>{ (byPk[t.pk]=byPk[t.pk]||[]).push(k); });
-      Object.keys(byPk).forEach(pk=>{
-        const ks=byPk[pk];
-        if (ks.length<G.MIN_FOR_HOLDOUT/2){ ks.forEach(k=>trIdx.push(k)); return; }
-        const sp=G.timeSplit(ks.length); sp.train.forEach(j=>trIdx.push(ks[j])); sp.hold.forEach(j=>hoIdx.push(ks[j]));
-      });
-      if (hoIdx.length>=2 && trIdx.length>=6){
-        const holdSet=new Set(hoIdx), extra=recentIdx.filter(k=>!holdSet.has(k));
-        const trW=trIdx.concat(extra);
-        const xT=tf.tensor2d(trW.map(k=>X[k])), yT=tf.tensor2d(trW.map(k=>Y[k]));
-        const xH=tf.tensor2d(hoIdx.map(k=>X[k])), yH=tf.tensor2d(hoIdx.map(k=>Y[k]));
-        await this.reg.fit(xT, yT, { epochs:EPOCHS, batchSize:8, shuffle:true, verbose:0, validationData:[xH,yH],
-          callbacks:[cb(true)] });
-        if (bestW){ this.reg.setWeights(bestW); bestW.forEach(w=>w.dispose()); bestW=null; }   /* roll back to the best held-back moment */
-        const pT=Array.from(await this.reg.predict(xT).data()), pH=Array.from(await this.reg.predict(xH).data());
-        trainErr=Stat.mae(trW.map(k=>Y[k][0]), pT); holdErr=Stat.mae(hoIdx.map(k=>Y[k][0]), pH); holdN=hoIdx.length;
-        xT.dispose(); yT.dispose(); xH.dispose(); yH.dispose();
-        /* the honest numbers are measured; now let it also learn from the newest weeks */
-        await this.reg.fit(xs, ys, { epochs:10, batchSize:8, shuffle:true, verbose:0, callbacks:[cb(false,false)] });
-      } else await plainFit();
-    } else await plainFit();
-    if (this.lossHistory.some(v=>!Number.isFinite(v))) { this.training=false; throw new Error('Learning broke down (invalid numbers appeared). Check the data for extreme values and retry.'); }
-
-    if (XC.length>=3){
-      const xc=tf.tensor2d(XC), yc=tf.tensor2d(YC);
-      const counts=new Array(CONTENT_CLASSES.length).fill(0); YC.forEach(r=>{ counts[r.indexOf(1)]++; });
-      this.classCounts=counts;   /* guardrail 3: rare content types get extra weight */
-      await this.clf.fit(xc, yc, {epochs:180, batchSize:4, shuffle:true, verbose:0, classWeight: G?G.classWeights(counts):undefined});
-      xc.dispose(); yc.dispose();
-    }
-
-    /* Evaluate the regressor against real held values */
-    const xsEval=tf.tensor2d(X);
-    const preds=this.reg.predict(xsEval);
-    const pv=Array.from(await preds.data());
-    xsEval.dispose();
-    const av=Y.map(v=>v[0]);
-    this.metrics.mae  = Stat.mae(av,pv);
-    this.metrics.rmse = Stat.rmse(av,pv);
-    const my=Stat.mean(av);
-    let ssRes=0, ssTot=0;
-    for(let i=0;i<av.length;i++){ ssRes+=(av[i]-pv[i])**2; ssTot+=(av[i]-my)**2; }
-    this.metrics.r2 = ssTot===0?0:1-ssRes/ssTot;
-    this.metrics.epochs = this.lossHistory.length;
-    this.metrics.rows = X.length;
-    this.metrics.params = this.reg.countParams() + (this.clf?this.clf.countParams():0);
-    this.lastFit={ actual:av, predicted:pv, labels:av.map((_,i)=>'s'+(i+1)) };
-
-    preds.dispose(); xs.dispose(); ys.dispose();
-    this.norms=platNorms;
-    this.trained=true; this.training=false;
-
-    /* Softmax class scores per platform */
-    this.classScores={};
-    client.platforms.forEach(pk=>{
-      const s=client.series[pk]; if(!s||!this.clf) return;
-      const f=this.features(s, s.er.length-1, platNorms[pk]);
-      const t=tf.tensor2d([f]);
-      const out=this.clf.predict(t);
-      const arr=Array.from(out.dataSync());
-      this.classScores[pk]=arr;
-      t.dispose(); out.dispose();
-    });
-
-    /* the ten accuracy safeguards, kept with this run */
-    try{
-      if (G){
-        const primary=client.primary&&client.series[client.primary]?client.primary:client.platforms[0];
-        const health=G.weightsHealth(this.reg.getWeights().map(w=>w.dataSync()));
-        this.guard=G.audit({ history:this.lossHistory, trainErr:trainErr, holdErr:holdErr, holdN:holdN, r2:this.metrics.r2, rows:X.length,
-          classCounts:XC.length>=3?this.classCounts:null, dataIssues:dataIssues, leak:leak, health:health,
-          drift:G.drift(client.series[primary]), adapted:this.recencyWeighted, holdPoints:(holdErr!=null&&platNorms[primary]&&platNorms[primary].er)?holdErr*((platNorms[primary].er.hi-platNorms[primary].er.lo)||1):null, scale:G.scaling(X), weeks:client.series[primary].er.length });
-      }
-    }catch(e){ console.warn('guardrail audit failed',e); this.guard=null; }
-    logEvent('model_trained', {
-      client:client.id, mae:+this.metrics.mae.toFixed(4),
-      r2:+this.metrics.r2.toFixed(4), params:this.metrics.params
-    });
-  },
+  /* Training happens in your Supabase database (edge function "train-net"); this page only sends the request, then
+     loads the saved result. See js/model-sync.js. */
+  async train(client, onEpoch){ return FYSync.trainRemote(client, onEpoch); },
 
   /* Roll the regressor forward n weeks for one platform */
   async forecast(client, platformKey, nWeeks){
@@ -2596,33 +2415,17 @@ async function retrainModels(){
     toast('Need at least 4 weeks of results to learn from','error',4200);
     renderAI(); return;
   }
+  if (NET.training) return;
   if (NET.clientId && NET.clientId!==c.id) NET.reset();
   NET.clientId=c.id; NET.lastError=null;
   const btn=document.getElementById('btn-train');
   if (btn){ btn.disabled=true; btn.textContent='Learning...'; }
-  const run=()=>NET.train(c,(e,total,loss)=>{
-    setText('net-status','Learning from your results \u00B7 '+Math.round(e/total*100)+'% done');
-    if (btn) btn.textContent='Learning '+Math.round(e/total*100)+'%';
-  });
+  setText('net-status','Learning in your database\u2026');
   try{
-    try{ await run(); if(!NET.trained) throw new Error('training stopped before it finished'); }
-    catch(first){
-      /* a graphics-card (WebGL) hiccup is the usual cause: retry on the plain processor */
-      NET.training=false;
-      if (tf.getBackend && tf.getBackend()!=='cpu'){
-        console.warn('training failed on '+tf.getBackend()+', retrying on cpu',first);
-        await tf.setBackend('cpu'); await tf.ready(); await run();
-        if(!NET.trained) throw first;
-      } else throw first;
-    }
-    if (typeof FYSync!=='undefined'){
-      await FYSync.fillForecasts(c);
-      setText('net-status','Saving to your database\u2026');
-      const r=await FYSync.saveNet(c);
-      if (r.superseded) return;
-      if (r.ok){ NET.savedAt=new Date().toISOString(); NET.savedRun={data_weeks:weekCount(c),data_posts:(c.posts_log||[]).length}; toast('Learned from '+NET.metrics.rows+' examples and saved to your database','success',4200); }
-      else toast('Trained, but NOT saved to the database: '+r.error,'error',8000);
-    }
+    await NET.train(c);
+    if(!NET.trained) throw new Error('training stopped before it finished');
+    await FYSync.fillForecasts(c);
+    toast('Learned from '+NET.metrics.rows+' examples in your database and saved the result','success',4200);
     await renderAI(); await renderDashboard();
   }catch(e){
     console.error(e); NET.training=false; NET.lastError=e.message||String(e);
@@ -4611,7 +4414,7 @@ function renderAIPlain(c){
   const wrap=(inner)=>'<div class="card plain-card" style="margin-bottom:14px"><div class="card-header"><div><div class="card-title">📖 In plain English</div>'+
     '<div class="card-sub">What the numbers below mean and how far to trust them</div></div></div>'+inner+'</div>';
   if(!NET.trained){
-    el.innerHTML=wrap('<ul class="plain-list"><li><span class="pl-k">🧠 What this is</span>A small neural network that learns from <em>only your own weekly entries</em> and tries to guess next week’s engagement rate. Each time it learns, the result is saved to your database so it is there on any device.</li>'+
+    el.innerHTML=wrap('<ul class="plain-list"><li><span class="pl-k">🧠 What this is</span>A small neural network that learns from <em>only your own weekly entries</em> and tries to guess next week’s engagement rate. It is trained inside your Supabase database, not on this device, and every result is saved there so it is the same on any device.</li>'+
       '<li><span class="pl-k">▶ To start</span>Enter at least <strong>4 weeks</strong> of data, then press <strong>Train Model</strong>.</li></ul>');
     return;
   }
@@ -4623,7 +4426,7 @@ function renderAIPlain(c){
   const drop=l0>0 ? Math.round((1-l1/l0)*100) : 0;
   const trust = m.rows<8 ? ['🔴 Low','var(--red)'] : (m.rows<20 ? ['🟡 Moderate','var(--amber)'] : ['🟢 Reasonable','var(--green)']);
   const items=[
-    '<li><span class="pl-k">🧠 What this is</span>A small neural network that learns from <em>only your own weekly entries</em> and guesses next week’s engagement rate. It trains inside your browser; nothing leaves your device.</li>',
+    '<li><span class="pl-k">🧠 What this is</span>A small neural network that learns from <em>only your own weekly entries</em> and guesses next week’s engagement rate. It is trained inside your Supabase database, not in this browser, and the result is saved there.</li>',
     '<li><span class="pl-k">⚙️ The status line</span><strong>'+fmt(m.params)+' parameters</strong> = adjustable dials (weights and biases) the network tunes. '+
       '<strong>'+m.epochs+' epochs</strong> = practice rounds over your data. <strong>'+m.rows+' training pairs</strong> = examples of “this week → what happened next week”.</li>',
     '<li><span class="pl-k">⚠️ Trust level: <span style="color:'+trust[1]+'">'+trust[0]+'</span></span>'+
@@ -4863,21 +4666,22 @@ async function migrateLocalToCloud(){
   try{ localStorage.removeItem('fy_clients_v3'); }catch(e){}
 }
 </script>
-<div id="fy-build" style="position:fixed;left:8px;bottom:6px;z-index:5;font-size:10px;color:var(--text3);opacity:.7;pointer-events:none">Build 2026-11-02.11</div>
-<script src="js/dl-activations.js?v=2026-11-02.11"></script>
-<script src="js/dl-cnn.js?v=2026-11-02.11"></script>
-<script src="js/dl-rnn.js?v=2026-11-02.11"></script>
-<script src="js/dl-gan.js?v=2026-11-02.11"></script>
-<script src="js/client-backup.js?v=2026-11-02.11"></script>
-<script src="js/mkt-benchmarks.js?v=2026-11-02.11"></script>
-<script src="js/mkt-metrics.js?v=2026-11-02.11"></script>
-<script src="js/mkt-lifecycle.js?v=2026-11-02.11"></script>
-<script src="js/dl-guardrails.js?v=2026-11-02.11"></script>
-<script src="js/dl-backtest.js?v=2026-11-02.11"></script>
-<script src="js/model-store.js?v=2026-11-02.11"></script>
-<script src="js/model-explain.js?v=2026-11-02.11"></script>
-<script src="js/model-sync.js?v=2026-11-02.11"></script>
-<script src="js/dl-lab.js?v=2026-11-02.11"></script>
-<script src="js/mkt-ui.js?v=2026-11-02.11"></script>
+<div id="fy-build" style="position:fixed;left:8px;bottom:6px;z-index:5;font-size:10px;color:var(--text3);opacity:.7;pointer-events:none">Build 2026-11-02.12</div>
+<script src="js/dl-activations.js?v=2026-11-02.12"></script>
+<script src="js/dl-cnn.js?v=2026-11-02.12"></script>
+<script src="js/dl-rnn.js?v=2026-11-02.12"></script>
+<script src="js/dl-gan.js?v=2026-11-02.12"></script>
+<script src="js/client-backup.js?v=2026-11-02.12"></script>
+<script src="js/mkt-benchmarks.js?v=2026-11-02.12"></script>
+<script src="js/mkt-metrics.js?v=2026-11-02.12"></script>
+<script src="js/mkt-lifecycle.js?v=2026-11-02.12"></script>
+<script src="js/dl-guardrails.js?v=2026-11-02.12"></script>
+<script src="js/dl-backtest.js?v=2026-11-02.12"></script>
+<script src="js/model-store.js?v=2026-11-02.12"></script>
+<script src="js/model-explain.js?v=2026-11-02.12"></script>
+<script src="js/net-core.js?v=2026-11-02.12"></script>
+<script src="js/model-sync.js?v=2026-11-02.12"></script>
+<script src="js/dl-lab.js?v=2026-11-02.12"></script>
+<script src="js/mkt-ui.js?v=2026-11-02.12"></script>
 </body>
 </html>

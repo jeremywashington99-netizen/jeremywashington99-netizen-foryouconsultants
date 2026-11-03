@@ -32,31 +32,33 @@
     minmax(a) { const lo = Stat.min(a), hi = Stat.max(a); return { lo: lo, hi: hi, norm: v => hi === lo ? 0.5 : (v - lo) / (hi - lo), denorm: v => v * (hi - lo) + lo }; }
   };
 
+  /* Feature vector for week i of a platform series: 7 inputs, all scaled into 0..1. */
+  function features(s, i, norms) {
+    const prevER = i > 0 ? s.er[i - 1] : s.er[0];
+    const prevER2 = i > 1 ? s.er[i - 2] : prevER;
+    /* running maximum: only weeks up to i, so no future week leaks in (guardrail 5) */
+    const postRate = s.posts[i] / Math.max(1, Math.max.apply(null, s.posts.slice(0, i + 1)));
+    const paidShare = s.paid[i] > 0 ? 1 : 0;
+    const saveRate = s.saves[i] / Math.max(1, s.reach[i]) * 100;
+    return [
+      norms.er.norm(s.er[i]),
+      norms.er.norm(prevER),
+      norms.er.norm(prevER2),
+      norms.fol.norm(s.followers[i]),
+      postRate,
+      paidShare,
+      Math.min(1, saveRate / 5)
+    ];
+  }
+
+
   function create(deps) {
     const Mlp = deps.Mlp, G = deps.G || null, CLASSES = deps.classes || [];
-    if (!Mlp) throw new Error('net-core needs the mini-mlp trainer');
     const rand = deps.rand || undefined;
 
-    /* Feature vector for week i of a platform series: 7 inputs, all scaled into 0..1. */
-    function features(s, i, norms) {
-      const prevER = i > 0 ? s.er[i - 1] : s.er[0];
-      const prevER2 = i > 1 ? s.er[i - 2] : prevER;
-      /* running maximum: only weeks up to i, so no future week leaks in (guardrail 5) */
-      const postRate = s.posts[i] / Math.max(1, Math.max.apply(null, s.posts.slice(0, i + 1)));
-      const paidShare = s.paid[i] > 0 ? 1 : 0;
-      const saveRate = s.saves[i] / Math.max(1, s.reach[i]) * 100;
-      return [
-        norms.er.norm(s.er[i]),
-        norms.er.norm(prevER),
-        norms.er.norm(prevER2),
-        norms.fol.norm(s.followers[i]),
-        postRate,
-        paidShare,
-        Math.min(1, saveRate / 5)
-      ];
-    }
-
+    function needMlp() { if (!Mlp) throw new Error('net-core needs the mini-mlp trainer to train'); }
     function buildRegressor() {
+      needMlp();
       /* Small on purpose: a few dozen weekly examples cannot support a big network without it memorising them.
          L2 weight penalty + 15% dropout + a modest learning rate keep it learning patterns. Hidden layers stay ReLU. */
       return Mlp.create({ name: 'sequential_1', inputDim: 7, loss: 'mse', lr: 0.008,
@@ -67,6 +69,7 @@
     }
 
     function buildClassifier(nClasses) {
+      needMlp();
       return Mlp.create({ name: 'sequential_2', inputDim: 7, loss: 'cce', lr: 0.02,
         layers: [{ name: 'clf_relu_24', units: 24, act: 'relu', init: 'he' },
                  { name: 'clf_relu_16', units: 16, act: 'relu', init: 'he' },
@@ -230,7 +233,7 @@
     function release(state) { if (state) { state.reg = null; state.clf = null; } }
 
     /* Roll the regressor forward n weeks for one platform */
-    async function forecast(state, client, platformKey, nWeeks) {
+    async function forecast_(state, client, platformKey, nWeeks) {
       const s = client.series[platformKey];
       if (!s || !state || !state.reg || !state.norms || !state.norms[platformKey]) return [];
       const norms = state.norms[platformKey];
@@ -264,8 +267,32 @@
       return out;
     }
 
-    return { FEATURE_VERSION: FEATURE_VERSION, features: features, buildRegressor: buildRegressor, buildClassifier: buildClassifier,
-             train: train, forecast: forecast, describe: describe, plainNorms: plainNorms, release: release };
+    /* The model_runs row for a finished training run: what the server saves, built in one place so tests see the same thing. */
+    async function runRow(st, c, ctx) {
+      const MAX_B64 = 900 * 1024;   /* one database row must stay readable on every page load */
+      const reg = st.reg.toBlob(), clf = st.clf ? st.clf.toBlob() : null;
+      if (reg.weightData.length > MAX_B64 || (clf && clf.weightData.length > MAX_B64)) throw new Error('model weights are too large for one database row');
+      const forecast = {};
+      for (const pk of c.platforms) { const f = await forecast_(st, c, pk, 6); if (f.length) forecast[pk] = f; }
+      const m = st.metrics, pk0 = c.primary || c.platforms[0];
+      const n0 = st.norms[pk0] && st.norms[pk0].er, rng = n0 ? ((n0.hi - n0.lo) || 1) : null;
+      /* the plain-English wording is built in the page from these numbers */
+      const summary = { trained_on: 'supabase', missPoints: rng ? m.mae * rng : null, guardrails: st.guard || null };
+      const weeks = Math.max.apply(null, c.platforms.map(pk => c.series[pk].er.length));
+      return {
+        owner_id: ctx.owner_id, client_id: ctx.client_id, kind: 'net', status: 'ok', model_name: 'engagement_network', framework: 'fy-mlp (plain JavaScript)',
+        backend: 'supabase edge function', architecture: { layers: describe(st), params: m.params },
+        hyperparams: { optimizer: 'adam', hidden: 'relu', output: 'linear (engagement) / softmax (content type)', trained_on: 'supabase' },
+        epochs: m.epochs, loss_final: st.lossHistory.length ? st.lossHistory[st.lossHistory.length - 1] : null,
+        mae: m.mae, rmse: m.rmse, r_squared: m.r2, train_rows: m.rows, data_weeks: weeks, data_posts: (c.posts_log || []).length,
+        metrics: m, forecast: forecast, summary: summary, activation_audit: null,
+        weights: { fv: FEATURE_VERSION, guard: st.guard || null, classCounts: st.classCounts || null, reg: reg, clf: clf,
+                   norms: plainNorms(st.norms), classScores: st.classScores, lossHistory: st.lossHistory, lastFit: st.lastFit, nClasses: CLASSES.length }
+      };
+    }
+
+    return { FEATURE_VERSION: FEATURE_VERSION, features: features, runRow: runRow, buildRegressor: buildRegressor, buildClassifier: buildClassifier,
+             train: train, forecast: forecast_, describe: describe, plainNorms: plainNorms, release: release };
   }
 
   /* Reject a payload that is not a sane client before spending any compute on it. */
@@ -293,5 +320,5 @@
     return null;
   }
 
-  return { FEATURE_VERSION: FEATURE_VERSION, Stat: Stat, create: create, validateClient: validateClient };
+  return { FEATURE_VERSION: FEATURE_VERSION, Stat: Stat, features: features, create: create, validateClient: validateClient };
 });
