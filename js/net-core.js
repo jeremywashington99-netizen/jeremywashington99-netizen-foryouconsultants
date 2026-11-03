@@ -7,12 +7,13 @@
    now the single copy, used by:
 
      - the Supabase edge function "train-net"   (where training really happens)
-     - the browser, for features() and forecast() on a model restored from the
-       database (reading a saved model, never training one)
      - the Node tests
 
-   tf, the guardrails module and the list of content classes are passed in, so
-   nothing here touches a window, a document or any browser storage.
+   The networks are trained by js/mini-mlp.js (plain JavaScript, no library),
+   which is what lets this finish well inside an edge function's compute
+   allowance. The guardrails module, the content classes and the MLP trainer
+   are passed in, so nothing here touches a window, a document or any browser
+   storage.
    ========================================================================== */
 (function (root, factory) {
   if (typeof module === 'object' && module.exports) module.exports = factory();
@@ -32,8 +33,9 @@
   };
 
   function create(deps) {
-    const tf = deps.tf, G = deps.G || null, CLASSES = deps.classes || [];
-    if (!tf) throw new Error('net-core needs tf');
+    const Mlp = deps.Mlp, G = deps.G || null, CLASSES = deps.classes || [];
+    if (!Mlp) throw new Error('net-core needs the mini-mlp trainer');
+    const rand = deps.rand || undefined;
 
     /* Feature vector for week i of a platform series: 7 inputs, all scaled into 0..1. */
     function features(s, i, norms) {
@@ -55,24 +57,20 @@
     }
 
     function buildRegressor() {
-      /* Small on purpose: a few dozen weekly examples cannot support a big network without it memorising them. */
-      const reg = () => tf.regularizers.l2({ l2: 0.004 });
-      const m = tf.sequential();
-      m.add(tf.layers.dense({ units: 24, activation: 'relu', inputShape: [7], kernelInitializer: 'heNormal', kernelRegularizer: reg(), useBias: true, name: 'dense_relu_24' }));
-      m.add(tf.layers.dropout({ rate: 0.15, name: 'dropout_15' }));
-      m.add(tf.layers.dense({ units: 12, activation: 'relu', kernelInitializer: 'heNormal', kernelRegularizer: reg(), useBias: true, name: 'dense_relu_12' }));
-      m.add(tf.layers.dense({ units: 1, activation: 'linear', kernelInitializer: 'glorotNormal', useBias: true, name: 'linear_out' }));
-      m.compile({ optimizer: tf.train.adam(0.008), loss: 'meanSquaredError', metrics: ['mse'] });
-      return m;
+      /* Small on purpose: a few dozen weekly examples cannot support a big network without it memorising them.
+         L2 weight penalty + 15% dropout + a modest learning rate keep it learning patterns. Hidden layers stay ReLU. */
+      return Mlp.create({ name: 'sequential_1', inputDim: 7, loss: 'mse', lr: 0.008,
+        layers: [{ name: 'dense_relu_24', units: 24, act: 'relu', init: 'he', l2: 0.004 },
+                 { name: 'dense_relu_12', units: 12, act: 'relu', init: 'he', l2: 0.004 },
+                 { name: 'linear_out', units: 1, act: 'linear', init: 'glorot' }],
+        dropout: { after: 0, rate: 0.15, name: 'dropout_15' } }, rand);
     }
 
     function buildClassifier(nClasses) {
-      const m = tf.sequential();
-      m.add(tf.layers.dense({ units: 24, activation: 'relu', inputShape: [7], kernelInitializer: 'heNormal', useBias: true, name: 'clf_relu_24' }));
-      m.add(tf.layers.dense({ units: 16, activation: 'relu', kernelInitializer: 'heNormal', useBias: true, name: 'clf_relu_16' }));
-      m.add(tf.layers.dense({ units: nClasses, activation: 'softmax', kernelInitializer: 'glorotNormal', useBias: true, name: 'softmax_out' }));
-      m.compile({ optimizer: tf.train.adam(0.02), loss: 'categoricalCrossentropy', metrics: ['accuracy'] });
-      return m;
+      return Mlp.create({ name: 'sequential_2', inputDim: 7, loss: 'cce', lr: 0.02,
+        layers: [{ name: 'clf_relu_24', units: 24, act: 'relu', init: 'he' },
+                 { name: 'clf_relu_16', units: 16, act: 'relu', init: 'he' },
+                 { name: 'softmax_out', units: nClasses, act: 'softmax', init: 'glorot' }] }, rand);
     }
 
     /**
@@ -86,11 +84,10 @@
       /* parts lets a server with a short time limit train the two networks in separate requests; they are independent */
       const parts = opts.parts || ['reg', 'clf'];
       const doReg = parts.indexOf('reg') >= 0, doClf = parts.indexOf('clf') >= 0;
-      try { await tf.ready(); } catch (e) {}
       const state = {
         reg: null, clf: null, norms: null, lossHistory: [], classScores: {}, classCounts: null, guard: null,
         recencyWeighted: false, lastFit: { actual: [], predicted: [], labels: [] },
-        metrics: { mae: 0, rmse: 0, r2: 0, epochs: 0, params: 0, backend: (tf.getBackend && tf.getBackend()) || 'cpu', rows: 0 }
+        metrics: { mae: 0, rmse: 0, r2: 0, epochs: 0, params: 0, backend: 'mini-mlp (plain JavaScript)', rows: 0 }
       };
 
       const X = [], Y = [], XC = [], YC = [], TAG = [];
@@ -131,8 +128,6 @@
       const reg = doReg ? buildRegressor() : null;
       const clf = doClf ? buildClassifier(CLASSES.length) : null;
       state.reg = reg; state.clf = clf;
-      const tensors = [];
-      const T = t => { tensors.push(t); return t; };
 
       try {
         let holdErr = null, trainErr = null, holdN = 0;
@@ -145,20 +140,20 @@
         const emph = (driftState === 'shifted' || driftState === 'moving');
         const recentIdx = []; if (emph) { const per = {}; TAG.forEach((t, k) => { (per[t.pk] = per[t.pk] || []).push(k); }); Object.keys(per).forEach(pk => per[pk].slice(-6).forEach(k => recentIdx.push(k))); }
         state.recencyWeighted = emph;
-        const xs = T(tf.tensor2d(X.concat(recentIdx.map(k => X[k])))), ys = T(tf.tensor2d(Y.concat(recentIdx.map(k => Y[k]))));
+        const xs = X.concat(recentIdx.map(k => X[k])), ys = Y.concat(recentIdx.map(k => Y[k]));
         const EPOCHS = X.length < 8 ? 300 : 220;
         /* guardrails 1 + 5: when there are enough examples, hold back the NEWEST weeks of each platform (never shuffled in) */
         let bestVal = Infinity, sinceBest = 0, bestW = null;
-        const cb = (watchVal, record) => ({ onEpochEnd: (e, logs) => {
+        const cb = (watchVal, record) => ((e, logs) => {
           if (record !== false) state.lossHistory.push(logs.loss);     /* the curve shown/checked is the main learning run only */
           if (watchVal && logs.val_loss != null) {                    /* early stopping, keeping the weights from the best held-back moment */
-            if (logs.val_loss < bestVal - 1e-6) { bestVal = logs.val_loss; sinceBest = 0; if (bestW) bestW.forEach(w => w.dispose()); bestW = reg.getWeights().map(w => w.clone()); }
+            if (logs.val_loss < bestVal - 1e-6) { bestVal = logs.val_loss; sinceBest = 0; bestW = reg.getWeights(); }
             else if (++sinceBest >= 50) reg.stopTraining = true;
           }
           if (onEpoch && e % 10 === 0) onEpoch(e, EPOCHS, logs.loss);
           if (!Number.isFinite(logs.loss)) reg.stopTraining = true;   /* guardrail 7: halt if numbers go invalid */
-        } });
-        const plainFit = () => reg.fit(xs, ys, { epochs: EPOCHS, batchSize: 8, shuffle: true, verbose: 0, callbacks: [cb()] });
+        });
+        const plainFit = () => reg.fit(xs, ys, { epochs: EPOCHS, batchSize: 8, shuffle: true, onEpochEnd: cb() });
         if (G && X.length >= G.MIN_FOR_HOLDOUT) {
           const trIdx = [], hoIdx = [];
           const byPk = {}; TAG.forEach((t, k) => { (byPk[t.pk] = byPk[t.pk] || []).push(k); });
@@ -170,32 +165,28 @@
           if (hoIdx.length >= 2 && trIdx.length >= 6) {
             const holdSet = new Set(hoIdx), extra = recentIdx.filter(k => !holdSet.has(k));
             const trW = trIdx.concat(extra);
-            const xT = T(tf.tensor2d(trW.map(k => X[k]))), yT = T(tf.tensor2d(trW.map(k => Y[k])));
-            const xH = T(tf.tensor2d(hoIdx.map(k => X[k]))), yH = T(tf.tensor2d(hoIdx.map(k => Y[k])));
-            await reg.fit(xT, yT, { epochs: EPOCHS, batchSize: 8, shuffle: true, verbose: 0, validationData: [xH, yH], callbacks: [cb(true)] });
-            if (bestW) { reg.setWeights(bestW); bestW.forEach(w => w.dispose()); bestW = null; }   /* roll back to the best held-back moment */
-            const oT = T(reg.predict(xT)), oH = T(reg.predict(xH));
-            const pT = Array.from(await oT.data()), pH = Array.from(await oH.data());
+            const xT = trW.map(k => X[k]), yT = trW.map(k => Y[k]);
+            const xH = hoIdx.map(k => X[k]), yH = hoIdx.map(k => Y[k]);
+            reg.fit(xT, yT, { epochs: EPOCHS, batchSize: 8, shuffle: true, validation: { X: xH, Y: yH }, onEpochEnd: cb(true) });
+            if (bestW) { reg.setWeights(bestW); bestW = null; }   /* roll back to the best held-back moment */
+            const pT = reg.predict(xT).map(r => r[0]), pH = reg.predict(xH).map(r => r[0]);
             trainErr = Stat.mae(trW.map(k => Y[k][0]), pT); holdErr = Stat.mae(hoIdx.map(k => Y[k][0]), pH); holdN = hoIdx.length;
             /* the honest numbers are measured; now let it also learn from the newest weeks */
-            await reg.fit(xs, ys, { epochs: 10, batchSize: 8, shuffle: true, verbose: 0, callbacks: [cb(false, false)] });
-          } else await plainFit();
-        } else await plainFit();
-        if (bestW) { bestW.forEach(w => w.dispose()); bestW = null; }
+            reg.fit(xs, ys, { epochs: 10, batchSize: 8, shuffle: true, onEpochEnd: cb(false, false) });
+          } else plainFit();
+        } else plainFit();
+        bestW = null;
         if (state.lossHistory.some(v => !Number.isFinite(v))) throw new Error('Learning broke down (invalid numbers appeared). Check the data for extreme values and retry.');
         state.holdout = { holdErr: holdErr, trainErr: trainErr, holdN: holdN };
         }
 
         if (doClf && XC.length >= 3) {
-          const xc = T(tf.tensor2d(XC)), yc = T(tf.tensor2d(YC));
-          await clf.fit(xc, yc, { epochs: 180, batchSize: 4, shuffle: true, verbose: 0, classWeight: G ? G.classWeights(state.classCounts) : undefined });
+          clf.fit(XC, YC, { epochs: 180, batchSize: 4, shuffle: true, classWeights: G ? G.classWeights(state.classCounts) : undefined });
         }
 
         if (doReg) {
         /* Evaluate the regressor against real held values */
-        const xsEval = T(tf.tensor2d(X));
-        const preds = T(reg.predict(xsEval));
-        const pv = Array.from(await preds.data());
+        const pv = reg.predict(X).map(r => r[0]);
         const av = Y.map(v => v[0]);
         const m = state.metrics;
         m.mae = Stat.mae(av, pv);
@@ -213,17 +204,14 @@
         /* Softmax class scores per platform */
         if (doClf) client.platforms.forEach(pk => {
           const s = client.series[pk]; if (!s) return;
-          const t = tf.tensor2d([features(s, s.er.length - 1, platNorms[pk])]);
-          const out = clf.predict(t);
-          state.classScores[pk] = Array.from(out.dataSync());
-          t.dispose(); out.dispose();
+          state.classScores[pk] = clf.predict([features(s, s.er.length - 1, platNorms[pk])])[0];
         });
 
         /* the ten accuracy safeguards, kept with this run */
         try {
           if (G && doReg) {
             const primary = client.primary && client.series[client.primary] ? client.primary : client.platforms[0];
-            const health = G.weightsHealth(reg.getWeights().map(w => w.dataSync()));
+            const health = G.weightsHealth(reg.getWeights());
             state.guard = G.audit({ history: state.lossHistory, trainErr: trainErr, holdErr: holdErr, holdN: holdN, r2: state.metrics.r2, rows: X.length,
               classCounts: XC.length >= 3 ? state.classCounts : null, dataIssues: dataIssues, leak: leak, health: health,
               drift: G.drift(client.series[primary]), adapted: state.recencyWeighted,
@@ -234,22 +222,12 @@
       } catch (e) {
         release(state);
         throw e;
-      } finally {
-        tensors.forEach(t => { try { t.dispose(); } catch (_) {} });
       }
       return state;
     }
 
-    /* Free a trained state. A model's optimiser keeps its own tensors, so it is released as well. */
-    function release(state) {
-      if (!state) return;
-      ['reg', 'clf'].forEach(k => {
-        const m = state[k]; if (!m) return;
-        try { if (m.optimizer && m.optimizer.dispose) m.optimizer.dispose(); } catch (_) {}
-        try { m.dispose(); } catch (_) {}
-        state[k] = null;
-      });
-    }
+    /* Nothing to free: the networks are plain arrays. Kept so callers need not care how training is done. */
+    function release(state) { if (state) { state.reg = null; state.clf = null; } }
 
     /* Roll the regressor forward n weeks for one platform */
     async function forecast(state, client, platformKey, nWeeks) {
@@ -268,10 +246,7 @@
           paid: rep(s.paid, 0),
           saves: rep(s.saves, s.saves[s.saves.length - 1])
         }, i, norms);   /* step k looks at the week it just predicted, not always the last real one */
-        const t = tf.tensor2d([f]);
-        const p = state.reg.predict(t);
-        const raw = (await p.data())[0];
-        t.dispose(); p.dispose();
+        const raw = state.reg.predict([f])[0][0];
         const val = +Math.max(0, norms.er.denorm(raw)).toFixed(2);
         out.push(val); er.push(val);
       }
@@ -280,22 +255,7 @@
 
     /* Layer table for the architecture panel */
     function describe(state) {
-      const rows = [];
-      const push = (model, tag) => {
-        if (!model) return;
-        model.layers.forEach(l => {
-          const w = l.getWeights();
-          rows.push({
-            head: tag, name: l.name,
-            activation: (l.getConfig && l.getConfig().activation) || (l.name.indexOf('dropout') > -1 ? 'dropout' : 'linear'),
-            units: (l.getConfig && l.getConfig().units) || '-',
-            weights: w.length ? w[0].shape.join(' x ') : '-', bias: w.length > 1 ? w[1].shape.join(' x ') : '-', params: l.countParams()
-          });
-        });
-      };
-      push(state.reg, 'regressor');
-      push(state.clf, 'classifier');
-      return rows;
+      return (state.reg ? state.reg.describe('regressor') : []).concat(state.clf ? state.clf.describe('classifier') : []);
     }
 
     function plainNorms(n) {
