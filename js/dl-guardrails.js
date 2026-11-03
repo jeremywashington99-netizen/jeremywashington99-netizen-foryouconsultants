@@ -273,6 +273,34 @@
     };
   }
 
+  /**
+   * Item 9 judged on evidence: if the forecast was tested THROUGH the change in audience
+   * (the latest backtests include it), say how it held up. shift = backtest shiftTest result.
+   */
+  function applyShiftEvidence(a, drift, shift, method) {
+    if (!a || !drift || (drift.state !== 'shifted' && drift.state !== 'moving') || !shift) return a;
+    const step = Math.abs(drift.now - drift.before), copy = JSON.parse(JSON.stringify(a));
+    const idx = copy.checks.findIndex(function (c) { return c.id === 'drift'; });
+    if (idx < 0) return a;
+    const level = Math.max(Math.abs(drift.now), 0.01), relRecent = shift.recent / level;
+    const withinStandard = relRecent <= 0.20;          // the same 20% standard the forecast badge uses for "Verified"
+    const holds = withinStandard || shift.recent <= 0.5 * step || (shift.ratio != null && shift.ratio <= 1.5);
+    const say = 'Engagement has ' + (drift.now > drift.before ? 'stepped up' : 'stepped down') + ' (' + drift.before + '% earlier, ' + drift.now + '% recently). The forecast was tested through that change: ' +
+      'on the latest ' + Math.ceil(shift.folds / 2) + ' tests it was typically ' + shift.recent + ' points off (' + Math.round(relRecent * 100) + '% of the current level' + (withinStandard ? ', inside the 20% used for "Verified"' : '') + '; earlier tests: ' + shift.earlier + '), using the "' + method + '" method. ' +
+      'While the audience is changing, the method is chosen on its recent record and the likely range is built from the latest tests, so it is wider than usual.';
+    copy.checks[idx] = holds
+      ? chk('drift', 9, 'Your audience changing', 'ok', say, '')
+      : chk('drift', 9, 'Your audience changing', 'watch', say + ' It was less accurate through the change, so lean on the likely range.', '');
+    copy.problems = copy.checks.filter(function (x) { return x.status === 'problem'; }).length;
+    copy.watches = copy.checks.filter(function (x) { return x.status === 'watch'; }).length;
+    copy.unknown = copy.checks.filter(function (x) { return x.status === 'unknown'; }).length;
+    copy.status = copy.problems ? 'problem' : copy.watches ? 'watch' : 'ok';
+    copy.headline = copy.problems ? copy.problems + ' safeguard' + (copy.problems === 1 ? '' : 's') + ' flagged a problem - read before relying on this forecast.'
+      : copy.watches ? copy.watches + ' thing' + (copy.watches === 1 ? '' : 's') + ' to keep an eye on.'
+      : (10 - copy.unknown) + ' of 10 safeguards passed' + (copy.unknown ? '; ' + copy.unknown + ' need more data to test.' : '.');
+    return copy;
+  }
+
   function html(a, esc) {
     esc = esc || function (s) { return String(s).replace(/[&<>"]/g, function (m) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[m]; }); };
     const icon = { ok: '<span style="color:var(--green)">&#10003;</span>', watch: '<span style="color:var(--amber)">&#9888;</span>', problem: '<span style="color:var(--red)">&#10007;</span>', unknown: '<span style="color:var(--text3)">&#9675;</span>' };
@@ -286,5 +314,5 @@
 
   return { MIN_FOR_HOLDOUT: MIN_FOR_HOLDOUT, HOLDOUT_FRACTION: HOLDOUT_FRACTION, timeSplit: timeSplit, classWeights: classWeights,
            validateSeries: validateSeries, leakProbe: leakProbe, weightsHealth: weightsHealth, lrDiagnosis: lrDiagnosis,
-           drift: drift, scaling: scaling, audit: audit, html: html };
+           drift: drift, scaling: scaling, audit: audit, applyShiftEvidence: applyShiftEvidence, html: html };
 });

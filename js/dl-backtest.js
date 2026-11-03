@@ -48,7 +48,34 @@
     for (let k = 1; k <= h; k++) { damp += Math.pow(phi, k); out.push(Math.max(0, l + damp * t)); }
     return out;
   }
-  const SIMPLE = { 'last week repeated': naive, 'recent average': recentMean, 'damped trend': dampedTrend };
+  /** A quick-moving level: new weeks count for 60%, so it follows a step change within a couple of weeks. */
+  function fastLevel(hist, h) {
+    let l = hist[0];
+    for (let i = 1; i < hist.length; i++) l = 0.6 * hist[i] + 0.4 * l;
+    return new Array(h).fill(l);
+  }
+  /**
+   * Looks for a change in level: the latest point where the weeks since sit clearly away
+   * (more than 2 normal swings) from the 6 weeks before it, and stay on that side.
+   * If it finds one, it forecasts from the new level only, so old weeks stop dragging it back.
+   */
+  function sinceShift(hist, h) {
+    const n = hist.length;
+    for (let k = n - 3; k >= 6; k--) {
+      const before = hist.slice(k - 6, k), after = hist.slice(k), mb = mean(before);
+      const sd = Math.max(Math.sqrt(mean(before.map(function (v) { return (v - mb) * (v - mb); }))), 0.05 * Math.abs(mb), 0.05);
+      const side = Math.sign(mean(after) - mb);
+      if (Math.abs(mean(after) - mb) > 2 * sd && after.every(function (v) { return Math.sign(v - mb) === side; })) return new Array(h).fill(mean(after));
+    }
+    return recentMean(hist, h);
+  }
+  /** Level that follows change, plus a fading trend: anticipates direction without running away. */
+  function blend(hist, h) {
+    const a = fastLevel(hist, h), b = dampedTrend(hist, h);
+    return a.map(function (v, i) { return (v + b[i]) / 2; });
+  }
+  const SIMPLE = { 'last week repeated': naive, 'recent average': recentMean, 'damped trend': dampedTrend,
+                   'fast-adapting level': fastLevel, 'since last shift': sinceShift, 'blend of level and trend': blend };
 
   /** The standard error measures, all on weeks the method had not seen. */
   function metrics(pairs) {
@@ -57,6 +84,17 @@
     const sst = act.reduce(function (a, v) { return a + (v - m) * (v - m); }, 0);
     const pct = pairs.filter(function (p) { return p[1] > 0; }).map(function (p) { return Math.abs(p[0] - p[1]) / p[1] * 100; });
     return { rmse: r2(Math.sqrt(sse / n)), mape: r2(mean(pct)), r2: sst > 0 ? r2(1 - sse / sst) : null, n: n };
+  }
+
+  /**
+   * Did the method stay accurate THROUGH a change in the audience? Compares its misses on the
+   * latest tests (which include the recent change) with the earlier tests.
+   */
+  function shiftTest(bt, name) {
+    const r = bt && bt.ok && bt.results[name];
+    if (!r || r.failed || !r.foldMae || r.foldMae.length < MIN_FOLDS) return null;
+    const f = r.foldMae, cut = Math.ceil(f.length / 2), earlier = mean(f.slice(0, cut)), recent = mean(f.slice(cut));
+    return { recent: r2(recent), earlier: r2(earlier), ratio: earlier > 0 ? r2(recent / earlier) : null, folds: f.length };
   }
 
   /** Does this method add anything over "next week = this week"? */
@@ -121,25 +159,33 @@
       if (failed || errors.length !== origins.length) { results[name] = { failed: failed || 'incomplete' }; continue; }
       const perHorizon = [];
       for (let j = 0; j < h; j++) perHorizon.push(r2(mean(errors.map(function (e) { return e[j]; }))));
-      results[name] = Object.assign({ perHorizon: perHorizon, mae: r2(mean(perHorizon)), errors: errors }, metrics(pairs));
+      results[name] = Object.assign({ perHorizon: perHorizon, mae: r2(mean(perHorizon)), errors: errors,
+        foldMae: errors.map(function (e) { return r2(mean(e)); }) }, metrics(pairs));
     }
     return { ok: true, folds: origins.length, origins: origins, horizon: h, weeks: n, results: results };
   }
 
   /** Lowest measured error wins; on a near-tie (within 3%) the simpler method wins. */
-  function choose(bt, order) {
+  function score(res, focusRecent) {
+    if (!focusRecent || !res.foldMae || res.foldMae.length < MIN_FOLDS) return res.mae;
+    const f = res.foldMae, recent = mean(f.slice(Math.floor(f.length / 2)));
+    return 0.5 * res.mae + 0.5 * recent;            // when the audience is changing, how a method did lately matters as much as its whole record
+  }
+  function choose(bt, order, focusRecent) {
     const names = (order || Object.keys(bt.results)).filter(function (n) { return bt.results[n] && !bt.results[n].failed; });
     if (!names.length) return null;
     let best = names[0];
-    names.forEach(function (n) { if (bt.results[n].mae < bt.results[best].mae * 0.97) best = n; });
+    names.forEach(function (n) { if (score(bt.results[n], focusRecent) < score(bt.results[best], focusRecent) * 0.97) best = n; });
     return best;
   }
 
   /** Measured likely range for each week ahead: the 80th-percentile real miss at that distance. */
-  function bands(res, horizonNeeded) {
+  function bands(res, horizonNeeded, focusRecent) {
     const h = res.perHorizon.length, out = [];
+    /* when the audience is changing, the range is built from the latest half of the tests so it widens with current volatility */
+    const errs = focusRecent && res.errors.length >= MIN_FOLDS ? res.errors.slice(Math.floor(res.errors.length / 2)) : res.errors;
     for (let j = 0; j < horizonNeeded; j++) {
-      if (j < h) out.push(r2(quantile(res.errors.map(function (e) { return e[j]; }), 0.8)));
+      if (j < h) out.push(r2(quantile(errs.map(function (e) { return e[j]; }), 0.8)));
       else out.push(r2(out[h - 1] * (1 + 0.15 * (j - h + 1))));      // beyond the tested distance: widen, and say untested
     }
     return out;
@@ -170,6 +216,6 @@
   }
 
   return { HORIZON: HORIZON, MIN_TRAIN: MIN_TRAIN, MIN_FOLDS: MIN_FOLDS, MAX_FOLDS: MAX_FOLDS, VERIFIED: VERIFIED, DIRECTIONAL: DIRECTIONAL,
-           metrics: metrics, skill: skill, assess: assess, SIMPLE: SIMPLE, naive: naive, recentMean: recentMean, dampedTrend: dampedTrend,
+           shiftTest: shiftTest, fastLevel: fastLevel, sinceShift: sinceShift, blend: blend, metrics: metrics, skill: skill, assess: assess, SIMPLE: SIMPLE, naive: naive, recentMean: recentMean, dampedTrend: dampedTrend,
            run: run, choose: choose, bands: bands, verdict: verdict, quantile: quantile };
 });

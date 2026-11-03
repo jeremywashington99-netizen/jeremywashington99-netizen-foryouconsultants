@@ -95,7 +95,7 @@
   /* The accuracy evidence: standard error measures per method, and the plain assessment table. */
   function metricsHTML(r) {
     if (!r.metrics || !Object.keys(r.metrics).length) return '';
-    const names = { 'last week repeated': 'Last week repeated (baseline)', 'recent average': 'Recent average', 'damped trend': 'Damped trend', 'neural network': 'Neural network' };
+    const names = { 'last week repeated': 'Last week repeated (baseline)', 'recent average': 'Recent average', 'damped trend': 'Damped trend', 'fast-adapting level': 'Fast-adapting level', 'since last shift': 'Level since last shift', 'blend of level and trend': 'Blend of level and trend', 'neural network': 'Neural network' };
     const rows = Object.keys(r.metrics).map(function (k) {
       const m = r.metrics[k], win = k === r.method;
       return '<tr' + (win ? ' style="font-weight:600"' : '') + '><td>' + esc(names[k] || k) + (win ? ' &#10003; used' : '') + '</td><td>' + m.mae + '</td><td>' + m.rmse + '</td><td>' + m.mape + '%</td><td>' +
@@ -165,7 +165,7 @@
 
   const BT = window.FYBacktest;
   LAB.bt = {};
-  const METHOD_ORDER = ['last week repeated', 'recent average', 'damped trend', 'neural network'];
+  const METHOD_ORDER = ['last week repeated', 'recent average', 'damped trend', 'fast-adapting level', 'since last shift', 'blend of level and trend', 'neural network'];
 
   /* Walk-forward test of every method on each platform; picks the one with the smallest real miss. */
   async function runBacktests(c, t) {
@@ -181,15 +181,17 @@
       };
       setText('rnn-status', 'Testing the forecast against your past weeks (' + platName(pk) + ')\u2026');
       const bt = await BT.run(vals, fns);
-      let best = 'neural network', bands = null, candidates = {}, metricsByMethod = {};
+      let best = 'neural network', bands = null, candidates = {}, metricsByMethod = {}, changing = false;
       if (bt.ok) {
-        best = BT.choose(bt, METHOD_ORDER) || 'neural network';
+        const dr = window.FYGuard ? FYGuard.drift(s) : { state: 'unknown' };
+        changing = dr.state === 'shifted' || dr.state === 'moving';
+        best = BT.choose(bt, METHOD_ORDER, changing) || 'neural network';
         METHOD_ORDER.forEach(function (k) { const x = bt.results[k]; if (x && !x.failed) { candidates[k] = x.mae; metricsByMethod[k] = { mae: x.mae, rmse: x.rmse, mape: x.mape, r2: x.r2, gain: BT.skill(bt, k) }; } });
-        bands = BT.bands(bt.results[best], 6);
+        bands = BT.bands(bt.results[best], 6, changing);
       }
       const forecast = (best === 'neural network' ? R.forecastRNN(tf, t, s, pk, 6) : BT.SIMPLE[best](vals, 6)).map(function (v) { return +Math.max(0, v).toFixed(2); });
       const v = BT.verdict(bt, best, vals);
-      out[pk] = { best: best, verdict: v, forecast: forecast, bands: bands, candidates: candidates, metrics: metricsByMethod, assessment: BT.assess(bt, best, vals, forecast, v), folds: bt.ok ? bt.folds : 0,
+      out[pk] = { best: best, verdict: v, forecast: forecast, bands: bands, candidates: candidates, metrics: metricsByMethod, shift: bt.ok ? BT.shiftTest(bt, best) : null, changing: changing, assessment: BT.assess(bt, best, vals, forecast, v), folds: bt.ok ? bt.folds : 0,
                   perHorizon: bt.ok ? bt.results[best].perHorizon : null, weeks: vals.length };
     }
     return out;
@@ -259,6 +261,7 @@
     renderRNN();
     try { if (typeof renderDashboard === 'function') await renderDashboard(); } catch (e) {}
     try { if (typeof renderAnalytics === 'function') await renderAnalytics(); } catch (e) {}
+    try { if (typeof renderAI === 'function') await renderAI(); } catch (e) {}   /* safeguard 9 uses this test */
   };
 
   async function saveOther(kind, fields, model) {

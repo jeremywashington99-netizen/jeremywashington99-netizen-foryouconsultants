@@ -116,6 +116,16 @@
     return { ok: true, restored: false };
   };
 
+  /* Item 9 uses the forecast's own walk-forward test through the change, when it is available. */
+  Sync.guardWithEvidence = function (c) {
+    try {
+      const pk = c.primary && c.series[c.primary] ? c.primary : (c.platforms || [])[0];
+      const bt = window.FYLab && FYLab.testedForecast ? FYLab.testedForecast(c.id, pk) : null;
+      if (!bt || !bt.shift) return NET.guard;
+      return FYGuard.applyShiftEvidence(NET.guard, FYGuard.drift(c.series[pk]), bt.shift, bt.best);
+    } catch (e) { return NET.guard; }
+  };
+
   /* ---------- plain-English panel ---------- */
   Sync.netPanelHTML = function (c) {
     if (!NET.trained) return '';
@@ -138,7 +148,7 @@
       (sm.weak ? '<div class="callout callout-warn" style="margin:8px 0">' + esc(sm.weak) + '</div>' : '') +
       (stale.stale ? '<div class="callout callout-info" style="margin:8px 0">' + esc(stale.reason) + '. Press <strong>Train Model</strong> to refresh it.</div>' : '') +
       '<div class="card-sub" style="margin:6px 0">' + saved + '</div>' +
-      (NET.guard && window.FYGuard ? FYGuard.html(NET.guard, esc) : '') +
+      (NET.guard && window.FYGuard ? FYGuard.html(Sync.guardWithEvidence(c), esc) : '') +
       '<details style="margin-top:8px"><summary class="card-sub" style="cursor:pointer">Technical detail (for analysts)</summary>' +
       '<div style="overflow-x:auto;margin-top:8px"><table class="data-table"><thead><tr><th>Stage</th><th>What it does</th><th>Rule it uses</th><th>Layer</th></tr></thead><tbody>' + tech + '</tbody></table></div></details>';
   };
