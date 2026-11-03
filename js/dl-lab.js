@@ -67,7 +67,7 @@
       /* measured, not assumed: the range is the real size of past misses at that distance */
       r.rows = r.rows.map(function (x, i) { return Object.assign({}, x, { low: Math.max(0, +(x.expected - bt.bands[i]).toFixed(2)), high: +(x.expected + bt.bands[i]).toFixed(2) }); });
       r.reliability = { level: bt.verdict.status, label: bt.verdict.label, why: [bt.verdict.headline].concat(bt.verdict.why) };
-      r.method = bt.best; r.candidates = bt.candidates; r.folds = bt.folds; r.verified = bt.verdict.verified;
+      r.method = bt.best; r.candidates = bt.candidates; r.metrics = bt.metrics; r.assessment = bt.assessment; r.folds = bt.folds; r.verified = bt.verdict.verified;
       r.learnedFrom = 'Method used: ' + bt.best + (bt.folds ? ' \u2014 it had the smallest miss of ' + Object.keys(bt.candidates).length + ' methods tested on ' + bt.folds + ' real past stretches of 4 weeks.' : '.');
     }
     return r;
@@ -87,9 +87,25 @@
       '<div style="margin-bottom:10px"><span class="badge" style="color:' + relCol + '">' + esc(rel.label) + '</span> ' +
       '<span class="card-sub">' + esc(rel.why.join(' ')) + '</span></div>' +
       '<div class="card-sub" style="margin-bottom:6px">' + esc(r.learnedFrom) + '</div>' +
-      (r.candidates ? '<div class="card-sub" style="margin-bottom:10px">Average miss per method (engagement points, lower is better): ' + Object.keys(r.candidates).map(function (k) { return esc(k) + ' <strong>' + r.candidates[k] + '</strong>'; }).join(' &middot; ') + '</div>' : '') +
+      metricsHTML(r) +
       '<div style="font-weight:600;margin-bottom:4px">What to do next</div><ul class="plain-list" style="margin:0 0 0 18px">' +
       r.doNext.map(function (d) { return '<li>' + esc(d) + '</li>'; }).join('') + '</ul></div>';
+  }
+
+  /* The accuracy evidence: standard error measures per method, and the plain assessment table. */
+  function metricsHTML(r) {
+    if (!r.metrics || !Object.keys(r.metrics).length) return '';
+    const names = { 'last week repeated': 'Last week repeated (baseline)', 'recent average': 'Recent average', 'damped trend': 'Damped trend', 'neural network': 'Neural network' };
+    const rows = Object.keys(r.metrics).map(function (k) {
+      const m = r.metrics[k], win = k === r.method;
+      return '<tr' + (win ? ' style="font-weight:600"' : '') + '><td>' + esc(names[k] || k) + (win ? ' &#10003; used' : '') + '</td><td>' + m.mae + '</td><td>' + m.rmse + '</td><td>' + m.mape + '%</td><td>' +
+        (m.r2 == null ? '&mdash;' : m.r2) + '</td><td>' + (m.gain == null ? '&mdash;' : (m.gain > 0 ? '+' : '') + m.gain + '%') + '</td></tr>';
+    }).join('');
+    const ass = (r.assessment || []).map(function (a) { return '<tr><td>' + esc(a.category) + '</td><td><strong>' + esc(a.rating) + '</strong></td><td class="card-sub">' + esc(a.note) + '</td></tr>'; }).join('');
+    return '<details style="margin:6px 0 10px"><summary class="card-sub" style="cursor:pointer">Accuracy evidence: how each method did on weeks it had not seen</summary>' +
+      '<div style="overflow-x:auto;margin-top:8px"><table class="data-table"><thead><tr><th>Method</th><th>Avg miss (MAE)</th><th>Big-miss penalty (RMSE)</th><th>Avg % miss (MAPE)</th><th>R&sup2; on new weeks</th><th>Better than baseline</th></tr></thead><tbody>' + rows + '</tbody></table></div>' +
+      '<div class="card-sub" style="margin:6px 0">A method has to beat "next week = last week" to be worth using; the one with the smallest miss is chosen. Misses are in engagement points.</div>' +
+      (ass ? '<div style="overflow-x:auto"><table class="data-table"><thead><tr><th>Check</th><th>Rating</th><th>Why</th></tr></thead><tbody>' + ass + '</tbody></table></div>' : '') + '</details>';
   }
 
   function renderRNN() {
@@ -165,15 +181,15 @@
       };
       setText('rnn-status', 'Testing the forecast against your past weeks (' + platName(pk) + ')\u2026');
       const bt = await BT.run(vals, fns);
-      let best = 'neural network', bands = null, candidates = {};
+      let best = 'neural network', bands = null, candidates = {}, metricsByMethod = {};
       if (bt.ok) {
         best = BT.choose(bt, METHOD_ORDER) || 'neural network';
-        METHOD_ORDER.forEach(function (k) { if (bt.results[k] && !bt.results[k].failed) candidates[k] = bt.results[k].mae; });
+        METHOD_ORDER.forEach(function (k) { const x = bt.results[k]; if (x && !x.failed) { candidates[k] = x.mae; metricsByMethod[k] = { mae: x.mae, rmse: x.rmse, mape: x.mape, r2: x.r2, gain: BT.skill(bt, k) }; } });
         bands = BT.bands(bt.results[best], 6);
       }
       const forecast = (best === 'neural network' ? R.forecastRNN(tf, t, s, pk, 6) : BT.SIMPLE[best](vals, 6)).map(function (v) { return +Math.max(0, v).toFixed(2); });
       const v = BT.verdict(bt, best, vals);
-      out[pk] = { best: best, verdict: v, forecast: forecast, bands: bands, candidates: candidates, folds: bt.ok ? bt.folds : 0,
+      out[pk] = { best: best, verdict: v, forecast: forecast, bands: bands, candidates: candidates, metrics: metricsByMethod, assessment: BT.assess(bt, best, vals, forecast, v), folds: bt.ok ? bt.folds : 0,
                   perHorizon: bt.ok ? bt.results[best].perHorizon : null, weeks: vals.length };
     }
     return out;

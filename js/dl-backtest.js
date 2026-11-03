@@ -50,6 +50,48 @@
   }
   const SIMPLE = { 'last week repeated': naive, 'recent average': recentMean, 'damped trend': dampedTrend };
 
+  /** The standard error measures, all on weeks the method had not seen. */
+  function metrics(pairs) {
+    const n = pairs.length, act = pairs.map(function (p) { return p[1]; }), m = mean(act);
+    const sse = pairs.reduce(function (a, p) { return a + (p[0] - p[1]) * (p[0] - p[1]); }, 0);
+    const sst = act.reduce(function (a, v) { return a + (v - m) * (v - m); }, 0);
+    const pct = pairs.filter(function (p) { return p[1] > 0; }).map(function (p) { return Math.abs(p[0] - p[1]) / p[1] * 100; });
+    return { rmse: r2(Math.sqrt(sse / n)), mape: r2(mean(pct)), r2: sst > 0 ? r2(1 - sse / sst) : null, n: n };
+  }
+
+  /** Does this method add anything over "next week = this week"? */
+  function skill(bt, name) {
+    const a = bt.results[name], b0 = bt.results['last week repeated'];
+    if (!a || a.failed || !b0 || b0.failed || !(b0.mae > 0)) return null;
+    return Math.round((1 - a.mae / b0.mae) * 100);
+  }
+
+  /**
+   * Plain assessment table - the five things a reviewer asks:
+   * continuity, trend, volatility, data sufficiency, verified accuracy.
+   */
+  function assess(bt, best, values, forecast, v) {
+    const n = values.length, rows = [];
+    const diffs = values.slice(1).map(function (x, i) { return Math.abs(x - values[i]); });
+    const typical = mean(diffs) || 0.01;
+    const jump = Math.abs(forecast[0] - values[n - 1]);
+    rows.push({ category: 'Forecast continuity', rating: jump <= typical * 1.5 ? 'Good' : 'Check',
+      note: jump <= typical * 1.5 ? 'Starts within a normal week-to-week move of the last real value.' : 'First forecast week jumps further than your usual weekly move.' });
+    const recent = values.slice(-4), slope = (recent[recent.length - 1] - recent[0]) / (recent.length - 1), fslope = (forecast[3] - forecast[0]) / 3;
+    const agree = Math.abs(slope) < typical * 0.15 || Math.abs(fslope) < typical * 0.15 || slope * fslope > 0;
+    rows.push({ category: 'Trend consistency', rating: agree ? 'Reasonable' : 'Check',
+      note: agree ? 'Direction fits the last 4 weeks (or both are flat).' : 'Heads the opposite way from the last 4 weeks; see the tests below for why.' });
+    const sd = function (a) { const m = mean(a); return Math.sqrt(mean(a.map(function (x) { return (x - m) * (x - m); }))); };
+    const ratio = sd(values) > 0 ? sd(forecast) / sd(values) : 1;
+    rows.push({ category: 'Volatility', rating: ratio < 0.5 ? 'Smoother than history' : 'Similar to history',
+      note: ratio < 0.5 ? 'Expected: a forecast is the most likely level, not a replay of random swings. The likely range shows how far a real week can stray.' : 'Moves about as much as your real weeks do.' });
+    rows.push({ category: 'Data sufficiency', rating: n >= 20 ? 'Good' : n >= 12 ? 'Limited' : 'Insufficient',
+      note: n + ' weeks. ' + (n >= 20 ? 'Enough for repeated testing.' : n >= 12 ? 'Enough to test, more will tighten it.' : 'Too few to test; treat as a rough guide.') });
+    rows.push({ category: 'Verified accuracy', rating: v.label,
+      note: bt.ok ? 'Tested on ' + bt.folds + ' past stretches; ' + (v.why[0] || '') : 'Not tested yet.' });
+    return rows;
+  }
+
   /* ---------- the test ---------- */
 
   /**
@@ -67,19 +109,19 @@
     for (let k = Math.max(firstPossible, last - maxFolds + 1); k <= last; k++) origins.push(k);
     const results = {};
     for (const name of Object.keys(forecasters)) {
-      const errors = [];                                  // errors[fold][horizon]
+      const errors = [], pairs = [];                      // errors[fold][horizon]; pairs of [forecast, actual]
       let failed = null;
       for (const k of origins) {
         try {
           const f = await forecasters[name](values.slice(0, k), h, k);
           if (!f || f.length < h || f.slice(0, h).some(function (v) { return !isFinite(v); })) throw new Error('invalid forecast');
-          errors.push(f.slice(0, h).map(function (v, j) { return Math.abs(v - values[k + j]); }));
+          errors.push(f.slice(0, h).map(function (v, j) { pairs.push([v, values[k + j]]); return Math.abs(v - values[k + j]); }));
         } catch (e) { failed = e.message; break; }
       }
       if (failed || errors.length !== origins.length) { results[name] = { failed: failed || 'incomplete' }; continue; }
       const perHorizon = [];
       for (let j = 0; j < h; j++) perHorizon.push(r2(mean(errors.map(function (e) { return e[j]; }))));
-      results[name] = { perHorizon: perHorizon, mae: r2(mean(perHorizon)), errors: errors };
+      results[name] = Object.assign({ perHorizon: perHorizon, mae: r2(mean(perHorizon)), errors: errors }, metrics(pairs));
     }
     return { ok: true, folds: origins.length, origins: origins, horizon: h, weeks: n, results: results };
   }
@@ -128,6 +170,6 @@
   }
 
   return { HORIZON: HORIZON, MIN_TRAIN: MIN_TRAIN, MIN_FOLDS: MIN_FOLDS, MAX_FOLDS: MAX_FOLDS, VERIFIED: VERIFIED, DIRECTIONAL: DIRECTIONAL,
-           SIMPLE: SIMPLE, naive: naive, recentMean: recentMean, dampedTrend: dampedTrend,
+           metrics: metrics, skill: skill, assess: assess, SIMPLE: SIMPLE, naive: naive, recentMean: recentMean, dampedTrend: dampedTrend,
            run: run, choose: choose, bands: bands, verdict: verdict, quantile: quantile };
 });
