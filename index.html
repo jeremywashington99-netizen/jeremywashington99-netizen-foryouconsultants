@@ -2004,7 +2004,7 @@ async function renderDashboard(){
     blankDashboard();
     return;
   }
-  banner.innerHTML='';
+  banner.innerHTML = c.derivedFromPosts ? '<div class="callout callout-info" style="margin-bottom:18px">Showing the '+RANGES[RANGE].label+' <strong>built from your individual posts</strong> ('+(RANGE==='day'?'one point per 4-hour block':'one point per day')+'). Weekly totals cannot be split into days, so followers shown are your latest weekly figure.</div>' : '';
 
   /* ---------- KPIs from the latest logged week ---------- */
   let fol=0, folPrev=0, reach=0, reachPrev=0, clicks=0, clicksPrev=0, erW=0, wt=0, erWPrev=0, wtPrev=0;
@@ -2053,6 +2053,16 @@ async function renderDashboard(){
   const dC=pct(clicks,clicksPrev);
   setText('k-clicks-d', wc>1? arrow(dC)+dC.toFixed(1)+'%' : 'first entry');
   document.getElementById('k-clicks-d').className = wc>1?cls(dC):'kpi-delta';
+
+  /* Day / Week built from posts: the headline numbers are totals for the posts in that window */
+  if (c.derivedFromPosts){
+    const ps=c.posts_log||[], sum=f=>ps.reduce((a,p)=>a+(Number(p[f])||0),0), rs=sum('reach');
+    const erR=rs>0 ? ps.reduce((a,p)=>a+(Number(p.er)||0)*(Number(p.reach)||0),0)/rs : (ps.length?sum('er')/ps.length:0);
+    const w=RANGES[RANGE].label, np=ps.length+' post'+(ps.length===1?'':'s')+' in the '+w;
+    setText('k-er', erR.toFixed(2)+'%'); setText('k-er-d', np+' \u00B7 reach-weighted'); document.getElementById('k-er-d').className='kpi-delta';
+    setText('k-reach', fmtK(rs)); setText('k-reach-d','total reach of those posts'); document.getElementById('k-reach-d').className='kpi-delta';
+    setText('k-clicks', fmt(sum('link_clicks'))); setText('k-clicks-d','link clicks on those posts'); document.getElementById('k-clicks-d').className='kpi-delta';
+  }
 
   /* ---------- Engagement chart ---------- */
   const base=c.series[c.primary];
@@ -4374,19 +4384,61 @@ function rangeCutoff(){
   return x.getFullYear()+'-'+p(x.getMonth()+1)+'-'+p(x.getDate());
 }
 
+/* Weekly entries cannot be split into days, but every logged post has an exact date and time.
+   For Day / Week (and Month when there are too few weekly entries) the charts are built from the
+   posts themselves: one point per 4-hour block (Day) or per day (Week / Month). */
+function seriesFromPosts(c, pk, s, posts, perDay){
+  const MS=3600000, now=Date.now(), pad=n=>String(n).padStart(2,'0');
+  const mon=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  const buckets={};
+  posts.forEach(p=>{
+    const t=new Date(p.posted_at); if(isNaN(t)) return;
+    const blk=perDay? new Date(t.getFullYear(),t.getMonth(),t.getDate()).getTime()
+                    : new Date(t.getFullYear(),t.getMonth(),t.getDate(),Math.floor(t.getHours()/4)*4).getTime();
+    (buckets[blk]=buckets[blk]||[]).push(p);
+  });
+  const keys=Object.keys(buckets).map(Number).sort((a,b)=>a-b);
+  if(!keys.length) return null;
+  const o={}; SERIES_KEYS.forEach(k=>o[k]=[]);
+  const fol=(s&&s.followers&&s.followers.length)? s.followers[s.followers.length-1] : 0;
+  keys.forEach(k=>{
+    const ps=buckets[k], d=new Date(k), sum=f=>ps.reduce((a,p)=>a+(Number(p[f])||0),0);
+    const reach=sum('reach'), erv=reach>0? ps.reduce((a,p)=>a+(Number(p.er)||0)*(Number(p.reach)||0),0)/reach : ps.reduce((a,p)=>a+(Number(p.er)||0),0)/ps.length;
+    o.dates.push(d.getFullYear()+'-'+pad(d.getMonth()+1)+'-'+pad(d.getDate()));
+    o.weeks.push(mon[d.getMonth()]+' '+d.getDate()+(perDay?'':' '+((d.getHours()%12)||12)+(d.getHours()<12?'a':'p')));
+    o.er.push(+erv.toFixed(2)); o.followers.push(fol); o.reach.push(reach);
+    o.clicks.push(sum('link_clicks')); o.posts.push(ps.length);
+    o.likes.push(sum('likes')); o.saves.push(sum('saves')); o.shares.push(sum('shares')); o.comments.push(sum('comments'));
+    o.paid.push(sum('spend'));
+  });
+  o.fromPosts=true;
+  return o;
+}
+
 /* A read-only copy of the client containing only entries inside the range */
 function scoped(c){
   const cut=rangeCutoff(); if(!cut||!c) return c;
-  const out=Object.assign({},c); out.series={};
+  const out=Object.assign({},c); out.series={}; out.derivedFromPosts=false;
+  const since=Date.now()-RANGES[RANGE].days*86400000;
+  out.posts_log=(c.posts_log||[]).filter(p=>p.posted_at && (RANGE==='day' ? new Date(p.posted_at).getTime()>=since : String(p.posted_at).slice(0,10)>=cut));
   Object.keys(c.series||{}).forEach(pk=>{
     const s=c.series[pk];
     if(!s||!Array.isArray(s.dates)||s.dates.length!==s.er.length){ out.series[pk]=s; return; }
     const keep=[]; s.dates.forEach((d,i)=>{ if(d>=cut) keep.push(i); });
     const o={};
     Object.keys(s).forEach(k=>{ o[k]=Array.isArray(s[k]) ? keep.map(i=>s[k][i]) : s[k]; });
+    /* too few weekly entries to draw a chart: use the posts instead */
+    if (keep.length<2 && RANGE!=='all'){
+      const fp=seriesFromPosts(c,pk,s,out.posts_log.filter(p=>p.platform===pk),RANGE!=='day');
+      if (fp){ out.series[pk]=fp; out.derivedFromPosts=true; return; }
+    }
     out.series[pk]=o;
   });
-  out.posts_log=(c.posts_log||[]).filter(p=>p.posted_at && String(p.posted_at).slice(0,10)>=cut);
+  if (out.derivedFromPosts){
+    /* a platform with nothing in this window is left out rather than drawn empty */
+    out.platforms=(c.platforms||[]).filter(pk=>out.series[pk]&&out.series[pk].er.length);
+    if (out.platforms.indexOf(out.primary)<0 && out.platforms.length) out.primary=out.platforms[0];
+  }
   return out;
 }
 
@@ -4797,21 +4849,21 @@ async function migrateLocalToCloud(){
   try{ localStorage.removeItem('fy_clients_v3'); }catch(e){}
 }
 </script>
-<div id="fy-build" style="position:fixed;left:8px;bottom:6px;z-index:5;font-size:10px;color:var(--text3);opacity:.7;pointer-events:none">Build 2026-11-02.6</div>
-<script src="js/dl-activations.js?v=2026-11-02.6"></script>
-<script src="js/dl-cnn.js?v=2026-11-02.6"></script>
-<script src="js/dl-rnn.js?v=2026-11-02.6"></script>
-<script src="js/dl-gan.js?v=2026-11-02.6"></script>
-<script src="js/client-backup.js?v=2026-11-02.6"></script>
-<script src="js/mkt-benchmarks.js?v=2026-11-02.6"></script>
-<script src="js/mkt-metrics.js?v=2026-11-02.6"></script>
-<script src="js/mkt-lifecycle.js?v=2026-11-02.6"></script>
-<script src="js/dl-guardrails.js?v=2026-11-02.6"></script>
-<script src="js/dl-backtest.js?v=2026-11-02.6"></script>
-<script src="js/model-store.js?v=2026-11-02.6"></script>
-<script src="js/model-explain.js?v=2026-11-02.6"></script>
-<script src="js/model-sync.js?v=2026-11-02.6"></script>
-<script src="js/dl-lab.js?v=2026-11-02.6"></script>
-<script src="js/mkt-ui.js?v=2026-11-02.6"></script>
+<div id="fy-build" style="position:fixed;left:8px;bottom:6px;z-index:5;font-size:10px;color:var(--text3);opacity:.7;pointer-events:none">Build 2026-11-02.7</div>
+<script src="js/dl-activations.js?v=2026-11-02.7"></script>
+<script src="js/dl-cnn.js?v=2026-11-02.7"></script>
+<script src="js/dl-rnn.js?v=2026-11-02.7"></script>
+<script src="js/dl-gan.js?v=2026-11-02.7"></script>
+<script src="js/client-backup.js?v=2026-11-02.7"></script>
+<script src="js/mkt-benchmarks.js?v=2026-11-02.7"></script>
+<script src="js/mkt-metrics.js?v=2026-11-02.7"></script>
+<script src="js/mkt-lifecycle.js?v=2026-11-02.7"></script>
+<script src="js/dl-guardrails.js?v=2026-11-02.7"></script>
+<script src="js/dl-backtest.js?v=2026-11-02.7"></script>
+<script src="js/model-store.js?v=2026-11-02.7"></script>
+<script src="js/model-explain.js?v=2026-11-02.7"></script>
+<script src="js/model-sync.js?v=2026-11-02.7"></script>
+<script src="js/dl-lab.js?v=2026-11-02.7"></script>
+<script src="js/mkt-ui.js?v=2026-11-02.7"></script>
 </body>
 </html>
