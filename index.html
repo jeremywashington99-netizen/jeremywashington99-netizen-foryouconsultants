@@ -1065,7 +1065,13 @@ const LOCAL_KEY = 'fy_local_mode';
    this device (Supabase anonymous sign-in). Every client, week and post
    is stored in Supabase under that account, protected by RLS and
    included in the nightly backups. Nothing is kept only in the browser. */
+let ANON_BUSY=null;
 async function startLocalMode(){
+  if (ANON_BUSY) return ANON_BUSY;
+  ANON_BUSY=startLocalMode_();
+  try{ return await ANON_BUSY; } finally { ANON_BUSY=null; }
+}
+async function startLocalMode_(){
   LOCAL_MODE = false;
   localStorage.setItem(LOCAL_KEY, '1');
   if (!sb){ deviceAccountFailed('The database library did not load. Check your connection and reload.'); return; }
@@ -1273,6 +1279,19 @@ function emptySeries(){
            likes:[], saves:[], shares:[], comments:[], paid:[] };
 }
 
+/* Client ids are the database primary key and are shared by every account,
+   so each id carries a short tag of the account that owns it. Two device
+   accounts can then both hold "Pourfected Mobile Bar" without colliding. */
+function scopeId(id){
+  const k=(typeof SESSION!=='undefined' && SESSION && SESSION.user && SESSION.user.id || '').slice(0,8);
+  if (!k || !id) return id;
+  return String(id).endsWith('-'+k) ? id : id+'-'+k;
+}
+function scopeClients(list){
+  list.forEach(c=>{ if(c && c.id) c.id=scopeId(c.id); });
+  return list;
+}
+
 const DB = {
   clients: [], activeId: null,
 
@@ -1285,7 +1304,7 @@ const DB = {
      until the owner enters or imports them. */
   starter(){
     return [{
-      id:'pourfected-mobile-bar',
+      id:scopeId('pourfected-mobile-bar'),
       name:'Pourfected Mobile Bar',
       industry:'Mobile Bar \u00B7 Weddings, Private Events, Corporate',
       location:'DMV',
@@ -1337,7 +1356,7 @@ const DB = {
     }
     const local=localStorage.getItem('fy_clients_v3');
     if (local){
-      try{ this.clients=JSON.parse(local); }catch(e){ this.clients=this.starter(); }
+      try{ this.clients=scopeClients(JSON.parse(local)); }catch(e){ this.clients=this.starter(); }
     } else {
       this.clients=this.starter();
       await this.save(this.clients[0]);
@@ -4481,8 +4500,9 @@ async function migrateLocalToCloud(){
     if (!lc || !lc.id) continue;
     const hasLocal=(lc.platforms||[]).some(pk=>lc.series&&lc.series[pk]&&lc.series[pk].er&&lc.series[pk].er.length) || (lc.posts_log||[]).length;
     if (!hasLocal) continue;
-    let c=DB.clients.find(x=>x.id===lc.id);
-    if (!c){ c=lc; DB.clients.push(c); }
+    const lid=lc.id, sid=scopeId(lc.id);
+    let c=DB.clients.find(x=>x.id===sid || x.id===lid);
+    if (!c){ lc.id=sid; c=lc; DB.clients.push(c); }
     else {
       (lc.platforms||[]).forEach(pk=>{
         const ls=lc.series&&lc.series[pk]; if(!ls||!ls.dates) return;
