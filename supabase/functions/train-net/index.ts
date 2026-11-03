@@ -16,6 +16,9 @@ const ANON = Deno.env.get("SUPABASE_ANON_KEY")!;
 const MIN_GAP_MS = 15_000;       // one training run per client every 15 s: stops a button held down
 const MAX_BODY = 2_000_000;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+// Client ids are text slugs made by the site (e.g. "acme-co-lx3k9a-1a2b3c4d"), not UUIDs.
+// Allow only URL-safe characters so the id can go straight into a REST filter.
+const CLIENT_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,159}$/;
 
 const CORS = {
   "access-control-allow-origin": "*",
@@ -45,17 +48,20 @@ Deno.serve(async (req) => {
   // deno-lint-ignore no-explicit-any
   let body: any;
   try { body = await req.json(); } catch { return json(400, { ok: false, error: "request was not valid JSON" }); }
-  const clientId = body && body.client_id;
-  if (!UUID.test(clientId || "")) return json(400, { ok: false, error: "client_id missing" });
+  const rawId = body && body.client_id;
+  if (rawId == null || rawId === "") return json(400, { ok: false, error: "client_id missing" });
+  if (typeof rawId !== "string" || !CLIENT_ID.test(rawId)) return json(400, { ok: false, error: "client_id is not a valid client id" });
+  const clientId: string = rawId;
+  const idQ = encodeURIComponent(clientId);
   const bad = g.FYNetCore.validateClient(body.client);
   if (bad) return json(400, { ok: false, error: bad });
 
   // the client must be one this account owns
-  const own = await rest(auth, `clients?id=eq.${clientId}&owner_id=eq.${user.id}&select=id`);
+  const own = await rest(auth, `clients?id=eq.${idQ}&owner_id=eq.${user.id}&select=id`);
   if (!own.ok || !((await own.json()) || []).length) return json(403, { ok: false, error: "that client is not in your account" });
 
   // throttle
-  const last = await rest(auth, `model_runs?client_id=eq.${clientId}&kind=eq.net&select=trained_at&order=trained_at.desc&limit=1`);
+  const last = await rest(auth, `model_runs?client_id=eq.${idQ}&kind=eq.net&select=trained_at&order=trained_at.desc&limit=1`);
   if (last.ok) {
     const r = (await last.json()) || [];
     if (r[0] && Date.now() - new Date(r[0].trained_at).getTime() < MIN_GAP_MS) return json(429, { ok: false, error: "just trained; wait a few seconds" });
