@@ -83,6 +83,9 @@
     async function train(client, opts) {
       opts = opts || {};
       const onEpoch = opts.onEpoch || null;
+      /* parts lets a server with a short time limit train the two networks in separate requests; they are independent */
+      const parts = opts.parts || ['reg', 'clf'];
+      const doReg = parts.indexOf('reg') >= 0, doClf = parts.indexOf('clf') >= 0;
       try { await tf.ready(); } catch (e) {}
       const state = {
         reg: null, clf: null, norms: null, lossHistory: [], classScores: {}, classCounts: null, guard: null,
@@ -125,13 +128,17 @@
 
       if (X.length < 3) throw new Error('Not enough data to train');
 
-      const reg = buildRegressor();
-      const clf = buildClassifier(CLASSES.length);
+      const reg = doReg ? buildRegressor() : null;
+      const clf = doClf ? buildClassifier(CLASSES.length) : null;
       state.reg = reg; state.clf = clf;
       const tensors = [];
       const T = t => { tensors.push(t); return t; };
 
       try {
+        let holdErr = null, trainErr = null, holdN = 0;
+        state.norms = platNorms;
+        if (XC.length >= 3) { const counts = new Array(CLASSES.length).fill(0); YC.forEach(r => { counts[r.indexOf(1)]++; }); state.classCounts = counts; }   /* guardrail 3: rare content types get extra weight */
+        if (doReg) {
         /* guardrail 9, acted on: if recent weeks sit away from older ones, the newest weeks are counted twice while learning */
         let driftState = 'unknown';
         try { const pk0 = client.primary && client.series[client.primary] ? client.primary : client.platforms[0]; driftState = G ? G.drift(client.series[pk0]).state : 'unknown'; } catch (e) {}
@@ -141,7 +148,6 @@
         const xs = T(tf.tensor2d(X.concat(recentIdx.map(k => X[k])))), ys = T(tf.tensor2d(Y.concat(recentIdx.map(k => Y[k]))));
         const EPOCHS = X.length < 8 ? 300 : 220;
         /* guardrails 1 + 5: when there are enough examples, hold back the NEWEST weeks of each platform (never shuffled in) */
-        let holdErr = null, trainErr = null, holdN = 0;
         let bestVal = Infinity, sinceBest = 0, bestW = null;
         const cb = (watchVal, record) => ({ onEpochEnd: (e, logs) => {
           if (record !== false) state.lossHistory.push(logs.loss);     /* the curve shown/checked is the main learning run only */
@@ -177,14 +183,15 @@
         } else await plainFit();
         if (bestW) { bestW.forEach(w => w.dispose()); bestW = null; }
         if (state.lossHistory.some(v => !Number.isFinite(v))) throw new Error('Learning broke down (invalid numbers appeared). Check the data for extreme values and retry.');
-
-        if (XC.length >= 3) {
-          const xc = T(tf.tensor2d(XC)), yc = T(tf.tensor2d(YC));
-          const counts = new Array(CLASSES.length).fill(0); YC.forEach(r => { counts[r.indexOf(1)]++; });
-          state.classCounts = counts;   /* guardrail 3: rare content types get extra weight */
-          await clf.fit(xc, yc, { epochs: 180, batchSize: 4, shuffle: true, verbose: 0, classWeight: G ? G.classWeights(counts) : undefined });
+        state.holdout = { holdErr: holdErr, trainErr: trainErr, holdN: holdN };
         }
 
+        if (doClf && XC.length >= 3) {
+          const xc = T(tf.tensor2d(XC)), yc = T(tf.tensor2d(YC));
+          await clf.fit(xc, yc, { epochs: 180, batchSize: 4, shuffle: true, verbose: 0, classWeight: G ? G.classWeights(state.classCounts) : undefined });
+        }
+
+        if (doReg) {
         /* Evaluate the regressor against real held values */
         const xsEval = T(tf.tensor2d(X));
         const preds = T(reg.predict(xsEval));
@@ -199,12 +206,12 @@
         m.r2 = ssTot === 0 ? 0 : 1 - ssRes / ssTot;
         m.epochs = state.lossHistory.length;
         m.rows = X.length;
-        m.params = reg.countParams() + (clf ? clf.countParams() : 0);
+        m.params = (reg ? reg.countParams() : 0) + (clf ? clf.countParams() : 0);
         state.lastFit = { actual: av, predicted: pv, labels: av.map((_, i) => 's' + (i + 1)) };
-        state.norms = platNorms;
+        }
 
         /* Softmax class scores per platform */
-        client.platforms.forEach(pk => {
+        if (doClf) client.platforms.forEach(pk => {
           const s = client.series[pk]; if (!s) return;
           const t = tf.tensor2d([features(s, s.er.length - 1, platNorms[pk])]);
           const out = clf.predict(t);
@@ -214,10 +221,10 @@
 
         /* the ten accuracy safeguards, kept with this run */
         try {
-          if (G) {
+          if (G && doReg) {
             const primary = client.primary && client.series[client.primary] ? client.primary : client.platforms[0];
             const health = G.weightsHealth(reg.getWeights().map(w => w.dataSync()));
-            state.guard = G.audit({ history: state.lossHistory, trainErr: trainErr, holdErr: holdErr, holdN: holdN, r2: m.r2, rows: X.length,
+            state.guard = G.audit({ history: state.lossHistory, trainErr: trainErr, holdErr: holdErr, holdN: holdN, r2: state.metrics.r2, rows: X.length,
               classCounts: XC.length >= 3 ? state.classCounts : null, dataIssues: dataIssues, leak: leak, health: health,
               drift: G.drift(client.series[primary]), adapted: state.recencyWeighted,
               holdPoints: (holdErr != null && platNorms[primary] && platNorms[primary].er) ? holdErr * ((platNorms[primary].er.hi - platNorms[primary].er.lo) || 1) : null,
