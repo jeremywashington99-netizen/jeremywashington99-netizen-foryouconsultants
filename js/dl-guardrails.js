@@ -246,6 +246,7 @@
 
     // 9 drift
     if (!i.drift || i.drift.state === 'unknown') c.push(chk('drift', 9, 'Your audience changing', 'unknown', 'Needs 8+ weeks to compare recent weeks with earlier ones.', ''));
+    else if (i.drift.state === 'shifted' && i.adapted) c.push(chk('drift', 9, 'Your audience changing', 'watch', 'Recent engagement (' + i.drift.now + '%) is well above the earlier pattern (' + i.drift.before + '%). The engine has counted your newest weeks twice while learning so it follows the new level.', 'It re-adapts every time you add a week. Check the forecast against the next real week.'));
     else if (i.drift.state === 'shifted') c.push(chk('drift', 9, 'Your audience changing', 'problem', 'Recent engagement (' + i.drift.now + '%) is well outside the earlier pattern (' + i.drift.before + '%). The engine learned an older audience.', 'Treat this forecast with care and retrain as new weeks arrive.'));
     else if (i.drift.state === 'moving') c.push(chk('drift', 9, 'Your audience changing', 'watch', 'Recent engagement (' + i.drift.now + '%) has moved from earlier weeks (' + i.drift.before + '%).', 'Retrain regularly; the engine refreshes whenever you add weeks.'));
     else c.push(chk('drift', 9, 'Your audience changing', 'ok', 'Recent weeks look like the earlier ones (' + i.drift.now + '% vs ' + i.drift.before + '%). Nothing has shifted.', ''));

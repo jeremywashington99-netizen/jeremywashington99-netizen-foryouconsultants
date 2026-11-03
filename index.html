@@ -1622,7 +1622,7 @@ const Stat = {
    model.getWeights() and rendered in the AI Insights view.
 ============================================================ */
 const NET = {
-  FEATURE_VERSION:2,   /* bump when the inputs change: older saved models would read them wrongly */
+  FEATURE_VERSION:3,   /* bump when the inputs change: older saved models would read them wrongly */
   reg:null, clf:null,
   lossHistory:[], trained:false, training:false,
   metrics:{ mae:0, rmse:0, r2:0, epochs:0, params:0, backend:'', rows:0 },
@@ -1658,13 +1658,15 @@ const NET = {
   },
 
   buildRegressor(){
+    /* Small on purpose: a few dozen weekly examples cannot support a big network without it memorising them.
+       L2 weight penalty + 25% dropout + a modest learning rate keep it learning patterns. Hidden layers stay ReLU. */
+    const reg=()=>tf.regularizers.l2({l2:0.004});
     const m=tf.sequential();
-    m.add(tf.layers.dense({units:32, activation:'relu',     inputShape:[7], kernelInitializer:'heNormal',      useBias:true, name:'dense_relu_32'}));
-    m.add(tf.layers.dense({units:24, activation:'relu',     kernelInitializer:'heNormal',     useBias:true, name:'dense_relu_24'}));
-    m.add(tf.layers.dropout({rate:0.10, name:'dropout_10'}));
-    m.add(tf.layers.dense({units:16, activation:'relu',     kernelInitializer:'heNormal',     useBias:true, name:'dense_relu_16'}));
+    m.add(tf.layers.dense({units:24, activation:'relu',     inputShape:[7], kernelInitializer:'heNormal', kernelRegularizer:reg(), useBias:true, name:'dense_relu_24'}));
+    m.add(tf.layers.dropout({rate:0.15, name:'dropout_15'}));
+    m.add(tf.layers.dense({units:12, activation:'relu',     kernelInitializer:'heNormal', kernelRegularizer:reg(), useBias:true, name:'dense_relu_12'}));
     m.add(tf.layers.dense({units:1,  activation:'linear',   kernelInitializer:'glorotNormal', useBias:true, name:'linear_out'}));
-    m.compile({optimizer:tf.train.adam(0.012), loss:'meanSquaredError', metrics:['mse']});
+    m.compile({optimizer:tf.train.adam(0.008), loss:'meanSquaredError', metrics:['mse']});
     return m;
   },
 
@@ -1724,15 +1726,22 @@ const NET = {
     this.reg=this.buildRegressor();
     this.clf=this.buildClassifier(CONTENT_CLASSES.length);
 
-    const xs=tf.tensor2d(X), ys=tf.tensor2d(Y);
+    /* guardrail 9, acted on: if recent weeks sit away from older ones, the newest weeks are counted twice while learning */
+    let driftState='unknown';
+    try{ const pk0=client.primary&&client.series[client.primary]?client.primary:client.platforms[0]; driftState=G?G.drift(client.series[pk0]).state:'unknown'; }catch(e){}
+    const emph=(driftState==='shifted'||driftState==='moving');
+    const recentIdx=[]; if (emph){ const per={}; TAG.forEach((t,k)=>{ (per[t.pk]=per[t.pk]||[]).push(k); }); Object.keys(per).forEach(pk=>per[pk].slice(-6).forEach(k=>recentIdx.push(k))); }
+    this.recencyWeighted=emph;
+    const xs=tf.tensor2d(X.concat(recentIdx.map(k=>X[k]))), ys=tf.tensor2d(Y.concat(recentIdx.map(k=>Y[k])));
     const EPOCHS = X.length<8 ? 300 : 220;
     /* guardrails 1 + 5: when there are enough examples, hold back the NEWEST weeks of each platform (never shuffled in) */
     let holdErr=null, trainErr=null, holdN=0;
-    let bestVal=Infinity, sinceBest=0;
-    const cb=(watchVal)=>({ onEpochEnd:(e,logs)=>{
-      this.lossHistory.push(logs.loss);
-      if (watchVal && logs.val_loss!=null){            /* early stopping: quit when held-back error stops improving for 40 rounds */
-        if (logs.val_loss<bestVal-1e-6){ bestVal=logs.val_loss; sinceBest=0; } else if (++sinceBest>=40) this.reg.stopTraining=true;
+    let bestVal=Infinity, sinceBest=0, bestW=null;
+    const cb=(watchVal, record=true)=>({ onEpochEnd:(e,logs)=>{
+      if (record) this.lossHistory.push(logs.loss);     /* the curve shown/checked is the main learning run only */
+      if (watchVal && logs.val_loss!=null){            /* early stopping, keeping the weights from the best held-back moment */
+        if (logs.val_loss<bestVal-1e-6){ bestVal=logs.val_loss; sinceBest=0; if(bestW) bestW.forEach(w=>w.dispose()); bestW=this.reg.getWeights().map(w=>w.clone()); }
+        else if (++sinceBest>=50) this.reg.stopTraining=true;
       }
       if (onEpoch && e%10===0) onEpoch(e, EPOCHS, logs.loss);
       if (!Number.isFinite(logs.loss)) this.reg.stopTraining=true;   /* guardrail 7: halt if numbers go invalid */
@@ -1747,15 +1756,18 @@ const NET = {
         const sp=G.timeSplit(ks.length); sp.train.forEach(j=>trIdx.push(ks[j])); sp.hold.forEach(j=>hoIdx.push(ks[j]));
       });
       if (hoIdx.length>=2 && trIdx.length>=6){
-        const xT=tf.tensor2d(trIdx.map(k=>X[k])), yT=tf.tensor2d(trIdx.map(k=>Y[k]));
+        const holdSet=new Set(hoIdx), extra=recentIdx.filter(k=>!holdSet.has(k));
+        const trW=trIdx.concat(extra);
+        const xT=tf.tensor2d(trW.map(k=>X[k])), yT=tf.tensor2d(trW.map(k=>Y[k]));
         const xH=tf.tensor2d(hoIdx.map(k=>X[k])), yH=tf.tensor2d(hoIdx.map(k=>Y[k]));
         await this.reg.fit(xT, yT, { epochs:EPOCHS, batchSize:8, shuffle:true, verbose:0, validationData:[xH,yH],
           callbacks:[cb(true)] });
+        if (bestW){ this.reg.setWeights(bestW); bestW.forEach(w=>w.dispose()); bestW=null; }   /* roll back to the best held-back moment */
         const pT=Array.from(await this.reg.predict(xT).data()), pH=Array.from(await this.reg.predict(xH).data());
-        trainErr=Stat.mae(trIdx.map(k=>Y[k][0]), pT); holdErr=Stat.mae(hoIdx.map(k=>Y[k][0]), pH); holdN=hoIdx.length;
+        trainErr=Stat.mae(trW.map(k=>Y[k][0]), pT); holdErr=Stat.mae(hoIdx.map(k=>Y[k][0]), pH); holdN=hoIdx.length;
         xT.dispose(); yT.dispose(); xH.dispose(); yH.dispose();
         /* the honest numbers are measured; now let it also learn from the newest weeks */
-        await this.reg.fit(xs, ys, { epochs:20, batchSize:8, shuffle:true, verbose:0, callbacks:[cb()] });
+        await this.reg.fit(xs, ys, { epochs:10, batchSize:8, shuffle:true, verbose:0, callbacks:[cb(false,false)] });
       } else await plainFit();
     } else await plainFit();
     if (this.lossHistory.some(v=>!Number.isFinite(v))) { this.training=false; throw new Error('Learning broke down (invalid numbers appeared). Check the data for extreme values and retry.'); }
@@ -1769,8 +1781,10 @@ const NET = {
     }
 
     /* Evaluate the regressor against real held values */
-    const preds=this.reg.predict(xs);
+    const xsEval=tf.tensor2d(X);
+    const preds=this.reg.predict(xsEval);
     const pv=Array.from(await preds.data());
+    xsEval.dispose();
     const av=Y.map(v=>v[0]);
     this.metrics.mae  = Stat.mae(av,pv);
     this.metrics.rmse = Stat.rmse(av,pv);
@@ -1806,7 +1820,7 @@ const NET = {
         const health=G.weightsHealth(this.reg.getWeights().map(w=>w.dataSync()));
         this.guard=G.audit({ history:this.lossHistory, trainErr:trainErr, holdErr:holdErr, holdN:holdN, r2:this.metrics.r2, rows:X.length,
           classCounts:XC.length>=3?this.classCounts:null, dataIssues:dataIssues, leak:leak, health:health,
-          drift:G.drift(client.series[primary]), scale:G.scaling(X), weeks:client.series[primary].er.length });
+          drift:G.drift(client.series[primary]), adapted:this.recencyWeighted, scale:G.scaling(X), weeks:client.series[primary].er.length });
       }
     }catch(e){ console.warn('guardrail audit failed',e); this.guard=null; }
     logEvent('model_trained', {
@@ -4849,21 +4863,21 @@ async function migrateLocalToCloud(){
   try{ localStorage.removeItem('fy_clients_v3'); }catch(e){}
 }
 </script>
-<div id="fy-build" style="position:fixed;left:8px;bottom:6px;z-index:5;font-size:10px;color:var(--text3);opacity:.7;pointer-events:none">Build 2026-11-02.7</div>
-<script src="js/dl-activations.js?v=2026-11-02.7"></script>
-<script src="js/dl-cnn.js?v=2026-11-02.7"></script>
-<script src="js/dl-rnn.js?v=2026-11-02.7"></script>
-<script src="js/dl-gan.js?v=2026-11-02.7"></script>
-<script src="js/client-backup.js?v=2026-11-02.7"></script>
-<script src="js/mkt-benchmarks.js?v=2026-11-02.7"></script>
-<script src="js/mkt-metrics.js?v=2026-11-02.7"></script>
-<script src="js/mkt-lifecycle.js?v=2026-11-02.7"></script>
-<script src="js/dl-guardrails.js?v=2026-11-02.7"></script>
-<script src="js/dl-backtest.js?v=2026-11-02.7"></script>
-<script src="js/model-store.js?v=2026-11-02.7"></script>
-<script src="js/model-explain.js?v=2026-11-02.7"></script>
-<script src="js/model-sync.js?v=2026-11-02.7"></script>
-<script src="js/dl-lab.js?v=2026-11-02.7"></script>
-<script src="js/mkt-ui.js?v=2026-11-02.7"></script>
+<div id="fy-build" style="position:fixed;left:8px;bottom:6px;z-index:5;font-size:10px;color:var(--text3);opacity:.7;pointer-events:none">Build 2026-11-02.8</div>
+<script src="js/dl-activations.js?v=2026-11-02.8"></script>
+<script src="js/dl-cnn.js?v=2026-11-02.8"></script>
+<script src="js/dl-rnn.js?v=2026-11-02.8"></script>
+<script src="js/dl-gan.js?v=2026-11-02.8"></script>
+<script src="js/client-backup.js?v=2026-11-02.8"></script>
+<script src="js/mkt-benchmarks.js?v=2026-11-02.8"></script>
+<script src="js/mkt-metrics.js?v=2026-11-02.8"></script>
+<script src="js/mkt-lifecycle.js?v=2026-11-02.8"></script>
+<script src="js/dl-guardrails.js?v=2026-11-02.8"></script>
+<script src="js/dl-backtest.js?v=2026-11-02.8"></script>
+<script src="js/model-store.js?v=2026-11-02.8"></script>
+<script src="js/model-explain.js?v=2026-11-02.8"></script>
+<script src="js/model-sync.js?v=2026-11-02.8"></script>
+<script src="js/dl-lab.js?v=2026-11-02.8"></script>
+<script src="js/mkt-ui.js?v=2026-11-02.8"></script>
 </body>
 </html>
