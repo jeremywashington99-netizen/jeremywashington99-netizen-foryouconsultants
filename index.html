@@ -1373,52 +1373,15 @@ function scopeClients(list){
 const DB = {
   clients: [], activeId: null,
 
-  /* Pourfected Mobile Bar.
-     Everything below is copied from the PUBLIC profile page on
-     2026-08-12. Public pages expose follower count, total likes,
-     following count and per-video view counts. They do NOT expose
-     reach, engagement rate, click-throughs, saves or demographics --
-     those exist only inside the owner analytics, so they stay empty
-     until the owner enters or imports them. */
-  starter(){
-    return [{
-      id:scopeId('pourfected-mobile-bar'),
-      name:'Pourfected Mobile Bar',
-      industry:'Mobile Bar \u00B7 Weddings, Private Events, Corporate',
-      location:'DMV',
-      bio:'Weddings \u00B7 Private Events \u00B7 Corporate. The perfect pour for every event.',
-      link:'https://beacons.ai/pourfectedmobilebar',
-      avatar:'PM',
-      color:'#FF0050',
-      primary:'tiktok',
-      platforms:['tiktok'],
-      handles:{ tiktok:'pourfectedmobilebar' },
-      profile_urls:{ tiktok:'https://www.tiktok.com/@pourfectedmobilebar' },
-      demographics:null,
-      /* Public profile snapshots -- observed, dated, sourced */
-      snapshots:[{
-        date:'2026-08-12',
-        platform:'tiktok',
-        followers:482,
-        following:2,
-        total_likes:3677,
-        source:'public_profile',
-        note:'Read from the public TikTok profile page'
-      }],
-      /* Videos visible on the public grid, view counts only */
-      posts_log:[
-        { id:'pv1', platform:'tiktok', title:'Blueberry syrup prep \u2014 pouring into the pot',
-          cls:1, reach:29200, likes:0, comments:0, shares:0, saves:0, er:0,
-          posted_at:null, dow:null, hour:null, hourBucket:null,
-          source:'public_profile', views_only:true },
-        { id:'pv2', platform:'tiktok', title:'Everything I bought from Amazon for the mobile bar',
-          cls:1, reach:2343, likes:0, comments:0, shares:0, saves:0, er:0,
-          posted_at:null, dow:null, hour:null, hourBucket:null,
-          source:'public_profile', views_only:true }
-      ],
-      series:{ tiktok: emptySeries() },
-      created_at:new Date().toISOString()
-    }];
+  /* No client is ever created automatically. */
+  starter(){ return []; },
+  /* The old auto-seeded demo client. Never created any more; recognised so cached/cloud copies are dropped. */
+  isStarter(c){
+    if(!c||!c.id) return false;
+    const base=String(c.id).replace(/-[0-9a-f]{8}$/,'');
+    if(base!=='pourfected-mobile-bar') return false;
+    const wk=Object.values(c.series||{}).reduce((n,p)=>n+((p&&p.er&&p.er.length)||0),0);
+    return wk===0;
   },
 
   async load(){
@@ -1426,21 +1389,22 @@ const DB = {
       try{
         const r=await sb.from('clients').select('*').order('created_at',{ascending:true});
         if (!r.error && r.data && r.data.length){
-          this.clients=r.data.map(row=> Object.assign({id:row.id,name:row.name,industry:row.industry}, row.payload||{}) );
-          this.activeId=this.clients[0].id;
+          const all=r.data.map(row=> Object.assign({id:row.id,name:row.name,industry:row.industry}, row.payload||{}) );
+          const demo=all.filter(c=>this.isStarter(c));
+          demo.forEach(c=>{ try{ sb.from('clients').delete().eq('id',c.id).then(()=>{},()=>{}); }catch(e){} });
+          this.clients=all.filter(c=>!this.isStarter(c));
+          this.activeId=this.clients[0]?this.clients[0].id:null;
           return;
         }
       }catch(e){ console.warn('clients read failed',e); }
     }
     const local=localStorage.getItem('fy_clients_v3');
     if (local){
-      try{ this.clients=scopeClients(JSON.parse(local)); }catch(e){ this.clients=this.starter(); }
+      try{ this.clients=scopeClients(JSON.parse(local)).filter(c=>!this.isStarter(c)); }catch(e){ this.clients=[]; }
     } else {
-      this.clients=this.starter();
-      await this.save(this.clients[0]);
+      this.clients=[];
     }
-    if (!this.clients.length) this.clients=this.starter();
-    this.activeId=this.clients[0].id;
+    this.activeId=this.clients[0]?this.clients[0].id:null;
   },
 
   persist(){ localStorage.setItem('fy_clients_v3', JSON.stringify(this.clients)); },
@@ -2629,7 +2593,7 @@ function openSwitcher(){
 function openConnectLink(){
   showModal('Add client by profile link',
     '<div class="mrow"><label>Profile URL or handle</label>'+
-    '<input type="text" id="cl-url" placeholder="https://www.tiktok.com/@pourfectedmobilebar"/></div>'+
+    '<input type="text" id="cl-url" placeholder="https://www.tiktok.com/@yourbusiness"/></div>'+
     '<div id="cl-detect" style="font-size:12px;color:var(--text2);min-height:18px"></div>'+
     '<div class="mrow"><label>Display name</label><input type="text" id="cl-name" placeholder="Business name"/></div>'+
     '<div class="mrow"><label>Industry</label><input type="text" id="cl-ind" placeholder="Mobile Bar &amp; Events"/></div>'+
@@ -4575,7 +4539,7 @@ async function migrateLocalToCloud(){
   if (!Array.isArray(local) || !local.length) return;
   let moved=0, wk=0, ps=0;
   for (const lc of local){
-    if (!lc || !lc.id) continue;
+    if (!lc || !lc.id || DB.isStarter(lc)) continue;
     const hasLocal=(lc.platforms||[]).some(pk=>lc.series&&lc.series[pk]&&lc.series[pk].er&&lc.series[pk].er.length) || (lc.posts_log||[]).length;
     if (!hasLocal) continue;
     const lid=lc.id, sid=scopeId(lc.id);
