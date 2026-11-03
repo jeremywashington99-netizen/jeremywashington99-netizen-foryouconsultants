@@ -15,6 +15,7 @@ const URL_ = Deno.env.get("SUPABASE_URL")!;
 const ANON = Deno.env.get("SUPABASE_ANON_KEY")!;
 const MIN_GAP_MS = 15_000;       // one training run per client every 15 s: stops a button held down
 const MAX_BODY = 2_000_000;
+const CLIENT_ID = /^[A-Za-z0-9_.:-]{1,80}$/;   // client ids are text in this database, not UUIDs
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 const CORS = {
@@ -46,7 +47,7 @@ Deno.serve(async (req) => {
   let body: any;
   try { body = await req.json(); } catch { return json(400, { ok: false, error: "request was not valid JSON" }); }
   const clientId = body && body.client_id;
-  if (!UUID.test(clientId || "")) return json(400, { ok: false, error: "client_id missing" });
+  if (typeof clientId !== "string" || !CLIENT_ID.test(clientId)) return json(400, { ok: false, error: "client_id missing" });
   const bad = g.FYNetCore.validateClient(body.client);
   if (bad) return json(400, { ok: false, error: bad });
 
