@@ -121,7 +121,7 @@
     if (!NET.trained) return '';
     const sm = X.netSummary({ r2: NET.metrics.r2, rows: NET.metrics.rows });
     const stale = S.staleness(NET.savedRun, weeksOf(c), postsOf(c));
-    const col = sm.fitPct >= 85 ? 'var(--green)' : sm.fitPct >= 60 ? 'var(--amber)' : 'var(--red)';
+    const col = sm.fitPct >= 55 ? 'var(--green)' : sm.fitPct >= 30 ? 'var(--amber)' : 'var(--red)';
     const saved = Sync.lastError
       ? '<span style="color:var(--red)">Not saved to the database: ' + esc(Sync.lastError) + '</span>'
       : (NET.savedAt || Sync.lastSave)

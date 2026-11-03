@@ -225,9 +225,11 @@
   function netSummary(m) {
     const r2v = num(m.r2), rows = num(m.rows);
     const fit = r2v == null ? null : Math.max(0, Math.min(1, r2v));
+    /* same cut-offs as the accuracy safeguards, so the headline and the checks never disagree */
     const verdict = fit == null ? 'Not rated'
       : fit >= 0.85 ? 'Follows your past results closely'
-      : fit >= 0.6 ? 'Follows the broad pattern'
+      : fit >= 0.55 ? 'Follows the broad pattern'
+      : fit >= 0.30 ? 'Finds part of the pattern'
       : 'Struggling to find a pattern';
     return {
       verdict: verdict,
@@ -237,7 +239,7 @@
       learnedFrom: rows == null ? '' : 'It learned from ' + plural(rows, 'week-to-week example') +
         ' - each one a week of results paired with what happened the week after.',
       caveat: 'This is a replay of weeks it learned from, so treat it as a ceiling, not a promise. Fresh weeks will score a little lower.',
-      weak: fit != null && fit < 0.5
+      weak: fit != null && fit < 0.3
         ? 'The pattern is weak, usually because the weeks vary a lot or there are few of them. Keep adding weeks before relying on the forecast.' : null
     };
   }
