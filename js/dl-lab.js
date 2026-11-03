@@ -58,16 +58,25 @@
 
   function platformReport(c, pk) {
     const s = c.series[pk], t = LAB.rnn;
-    const f = R.forecastRNN(tf, t, s, pk, 4).map(function (v) { return Math.max(0, v); });
+    const bt = LAB.bt && LAB.bt[pk];
+    const f = (bt ? bt.forecast.slice(0, 4) : R.forecastRNN(tf, t, s, pk, 4)).map(function (v) { return Math.max(0, v); });
     const posts = (c.posts_log || []).filter(function (p) { return p.platform === pk; });
-    return Ex.explainForecast({ platform: pk, platformLabel: platName(pk), series: s, forecast: f, posts: posts,
+    const r = Ex.explainForecast({ platform: pk, platformLabel: platName(pk), series: s, forecast: f, posts: posts,
       classNames: CONTENT_CLASSES, missPoints: Ex.missInPoints(t.maeScaled, t.scalers[pk], erIndex()) });
+    if (bt && r.ok) {
+      /* measured, not assumed: the range is the real size of past misses at that distance */
+      r.rows = r.rows.map(function (x, i) { return Object.assign({}, x, { low: Math.max(0, +(x.expected - bt.bands[i]).toFixed(2)), high: +(x.expected + bt.bands[i]).toFixed(2) }); });
+      r.reliability = { level: bt.verdict.status, label: bt.verdict.label, why: [bt.verdict.headline].concat(bt.verdict.why) };
+      r.method = bt.best; r.candidates = bt.candidates; r.folds = bt.folds; r.verified = bt.verdict.verified;
+      r.learnedFrom = 'Method used: ' + bt.best + (bt.folds ? ' \u2014 it had the smallest miss of ' + Object.keys(bt.candidates).length + ' methods tested on ' + bt.folds + ' real past stretches of 4 weeks.' : '.');
+    }
+    return r;
   }
   function reportHTML(r) {
     if (!r.ok) return '<div class="callout callout-info" style="margin-top:12px">' + esc(r.headline) + '</div>';
     const col = r.direction === 'up' ? 'var(--green)' : r.direction === 'down' ? 'var(--amber)' : 'var(--text)';
     const rel = r.reliability;
-    const relCol = rel.level === 'strong' ? 'var(--green)' : rel.level === 'useful' ? 'var(--green)' : rel.level === 'early' ? 'var(--amber)' : 'var(--amber)';
+    const relCol = (rel.level === 'strong' || rel.level === 'useful' || rel.level === 'verified') ? 'var(--green)' : rel.level === 'unreliable' ? 'var(--red)' : 'var(--amber)';
     const rows = r.rows.map(function (x) {
       return '<tr><td>In ' + x.week + ' week' + (x.week === 1 ? '' : 's') + '</td><td><strong>' + x.expected + '%</strong></td><td>' +
         (x.low == null ? '&mdash;' : x.low + '% to ' + x.high + '%') + '</td></tr>';
@@ -77,7 +86,8 @@
       '<div style="overflow-x:auto;margin:10px 0"><table class="data-table"><thead><tr><th>When</th><th>Expected engagement</th><th>Likely range</th></tr></thead><tbody>' + rows + '</tbody></table></div>' +
       '<div style="margin-bottom:10px"><span class="badge" style="color:' + relCol + '">' + esc(rel.label) + '</span> ' +
       '<span class="card-sub">' + esc(rel.why.join(' ')) + '</span></div>' +
-      '<div class="card-sub" style="margin-bottom:10px">' + esc(r.learnedFrom) + '</div>' +
+      '<div class="card-sub" style="margin-bottom:6px">' + esc(r.learnedFrom) + '</div>' +
+      (r.candidates ? '<div class="card-sub" style="margin-bottom:10px">Average miss per method (engagement points, lower is better): ' + Object.keys(r.candidates).map(function (k) { return esc(k) + ' <strong>' + r.candidates[k] + '</strong>'; }).join(' &middot; ') + '</div>' : '') +
       '<div style="font-weight:600;margin-bottom:4px">What to do next</div><ul class="plain-list" style="margin:0 0 0 18px">' +
       r.doNext.map(function (d) { return '<li>' + esc(d) + '</li>'; }).join('') + '</ul></div>';
   }
@@ -108,7 +118,7 @@
     if (live) {
       mkChart('c-rnn-loss', 'line', { labels: LAB.rnn.history.map(function (_, i) { return i; }),
         datasets: [{ data: LAB.rnn.history, borderColor: '#4FC3F7', pointRadius: 0, borderWidth: 2, tension: .3 }] }, baseOpts(function (v) { return v.toFixed(3); }));
-    } else if (!LAB.rnnLoading && !LAB.rnnTried[c.id]) { LAB.loadSavedRNN(); }
+    } else if (!LAB.rnnLoading && !LAB.rnnTried[c.id]) { LAB.autoForecast(c); }
   }
 
   /* Plain-English layer table; the exact layer names sit in the last column for analysts. */
@@ -137,6 +147,48 @@
       drift: G.drift(c.series[pk0]), scale: G.scaling(rows), weeks: c.series[pk0].er.length });
   }
 
+  const BT = window.FYBacktest;
+  LAB.bt = {};
+  const METHOD_ORDER = ['last week repeated', 'recent average', 'damped trend', 'neural network'];
+
+  /* Walk-forward test of every method on each platform; picks the one with the smallest real miss. */
+  async function runBacktests(c, t) {
+    const out = {};
+    for (const pk of t.platforms) {
+      const s = c.series[pk], vals = s.er.map(Number);
+      const fns = Object.assign({}, BT.SIMPLE);
+      fns['neural network'] = async function (hist, h, k) {
+        const sub = {}; Object.keys(s).forEach(function (key) { sub[key] = Array.isArray(s[key]) ? s[key].slice(0, k) : s[key]; });
+        const one = {}; one[pk] = sub;
+        const m = await R.trainRNN(tf, one, { epochs: 60 });
+        try { return R.forecastRNN(tf, m, sub, pk, h).map(function (v) { return Math.max(0, v); }); } finally { m.model.dispose(); }
+      };
+      setText('rnn-status', 'Testing the forecast against your past weeks (' + platName(pk) + ')\u2026');
+      const bt = await BT.run(vals, fns);
+      let best = 'neural network', bands = null, candidates = {};
+      if (bt.ok) {
+        best = BT.choose(bt, METHOD_ORDER) || 'neural network';
+        METHOD_ORDER.forEach(function (k) { if (bt.results[k] && !bt.results[k].failed) candidates[k] = bt.results[k].mae; });
+        bands = BT.bands(bt.results[best], 6);
+      }
+      const forecast = (best === 'neural network' ? R.forecastRNN(tf, t, s, pk, 6) : BT.SIMPLE[best](vals, 6)).map(function (v) { return +Math.max(0, v).toFixed(2); });
+      const v = BT.verdict(bt, best, vals);
+      out[pk] = { best: best, verdict: v, forecast: forecast, bands: bands, candidates: candidates, folds: bt.ok ? bt.folds : 0,
+                  perHorizon: bt.ok ? bt.results[best].perHorizon : null, weeks: vals.length };
+    }
+    return out;
+  }
+
+  /* Used by the dashboard: the tested forecast for a platform, or null. */
+  LAB.testedForecast = function (clientId, pk) { return LAB.rnnClient === clientId && LAB.bt && LAB.bt[pk] ? LAB.bt[pk] : null; };
+
+  /* Open a client: restore the saved forecast, or build and test one. */
+  LAB.autoForecast = async function (c) {
+    if (!c || !Store || platformsWithWeeks(c, 4).length === 0) return;
+    if (!LAB.rnnTried[c.id]) await LAB.loadSavedRNN();
+    if (!(LAB.rnn && LAB.rnnClient === c.id) && !LAB.rnnBusy) await LAB.trainRNN();
+  };
+
   LAB.rnnTried = {};
   LAB.loadSavedRNN = async function () {
     const c = client(); if (!c || !Store) return;
@@ -148,7 +200,7 @@
         if (LAB.rnn) LAB.rnn.model.dispose();
         LAB.rnn = { model: await Store.restoreModel(tf, w.model), scalers: w.scalers, lookback: w.lookback, platforms: w.platforms,
                     history: w.history || [], windows: w.windows, task: w.task || 'regression', maeScaled: w.maeScaled };
-        LAB.rnnGuard = w.guard || null;
+        LAB.rnnGuard = w.guard || null; LAB.bt = w.backtest || {};
         LAB.rnnClient = c.id; LAB.rnnRun = r.run; LAB.rnnSavedAt = r.run.trained_at; LAB.rnnSaveError = null;
       } else if (!r.ok) LAB.rnnError = 'Could not load your saved forecast: ' + r.error;
     } catch (e) { LAB.rnnError = 'Could not rebuild the saved forecast: ' + e.message; }
@@ -159,6 +211,8 @@
     const c = client(); const btn = el('rnn-btn');
     const series = {}; platformsWithWeeks(c, 4).forEach(function (pk) { series[pk] = c.series[pk]; });
     if (btn) { btn.disabled = true; btn.textContent = 'Learning...'; }
+    if (LAB.rnnBusy) return;
+    LAB.rnnBusy = true;
     LAB.rnnError = null; LAB.rnnSaveError = null;
     try {
       if (LAB.rnn) LAB.rnn.model.dispose();
@@ -166,25 +220,29 @@
       const t = await R.trainRNN(tf, series, { epochs: 150, onEpoch: function (e, n) {
         if (e % 10 === 0) setText('rnn-status', 'Learning from your results · ' + Math.round(e / n * 100) + '% done'); } });
       LAB.rnn = t; LAB.rnnClient = c.id; LAB.rnnGuard = rnnGuard(c, t);
+      LAB.bt = await runBacktests(c, t);
       const reports = {}, fc = {};
       t.platforms.forEach(function (pk) { const r = platformReport(c, pk); reports[pk] = r; fc[pk] = r.rows ? r.rows.map(function (x) { return x.expected; }) : []; });
       const weeks = Math.max.apply(null, t.platforms.map(function (pk) { return c.series[pk].er.length; }));
       setText('rnn-status', 'Saving to your database…');
       const wBlob = { model: await Store.serializeModel(tf, t.model), scalers: t.scalers, lookback: t.lookback, platforms: t.platforms,
-                      history: t.history, windows: t.windows, task: t.task, maeScaled: t.maeScaled, guard: LAB.rnnGuard };
+                      history: t.history, windows: t.windows, task: t.task, maeScaled: t.maeScaled, guard: LAB.rnnGuard, backtest: LAB.bt };
       const saved = await Store.saveRun(sb, ownerId(), {
         client_id: c.id, kind: 'rnn', status: 'ok', model_name: 'weekly_forecast', backend: (tf.getBackend && tf.getBackend()) || null,
         epochs: t.history.length, loss_final: t.history.length ? t.history[t.history.length - 1] : null, mae: t.maeScaled,
         train_rows: t.windows, data_weeks: weeks, data_posts: (c.posts_log || []).length,
         architecture: { type: 'LSTM', lookback: t.lookback, platforms: t.platforms, params: t.model.countParams() },
         hyperparams: { epochs: 150, hidden: 'relu', output: 'linear' }, metrics: { maeScaled: t.maeScaled, windows: t.windows },
-        forecast: fc, summary: { guardrails: LAB.rnnGuard, headlines: Object.keys(reports).reduce(function (o, k) { o[k] = reports[k].headline; return o; }, {}), reports: reports },
+        forecast: fc, summary: { guardrails: LAB.rnnGuard, backtest: LAB.bt, headlines: Object.keys(reports).reduce(function (o, k) { o[k] = reports[k].headline; return o; }, {}), reports: reports },
         activation_audit: A.auditModel(t.model, 'regression'), weights: wBlob });
       if (saved.ok) { LAB.rnnSavedAt = new Date().toISOString(); LAB.rnnRun = { data_weeks: weeks, data_posts: (c.posts_log || []).length }; toast('Forecast updated and saved to your database', 'success'); }
       else { LAB.rnnSaveError = saved.error; toast('Forecast updated, but NOT saved to the database: ' + saved.error, 'error', 8000); }
       logEvent('rnn_trained', { client: c.id, windows: t.windows, lookback: t.lookback });
     } catch (e) { LAB.rnn = null; LAB.rnnError = e.message; toast('Forecast failed: ' + e.message, 'error', 6000); }
+    LAB.rnnBusy = false;
     renderRNN();
+    try { if (typeof renderDashboard === 'function') await renderDashboard(); } catch (e) {}
+    try { if (typeof renderAnalytics === 'function') await renderAnalytics(); } catch (e) {}
   };
 
   async function saveOther(kind, fields, model) {

@@ -57,7 +57,7 @@
         hyperparams: { optimizer: 'adam', hidden: 'relu', output: 'linear (engagement) / softmax (content type)' },
         metrics: NET.metrics, forecast: NET.forecasts || null, summary: summary,
         activation_audit: (window.FYDL && FYDL.activations) ? { regressor: FYDL.activations.auditModel(NET.reg, 'regression') } : null,
-        weights: { guard: NET.guard || null, classCounts: NET.classCounts || null, reg: reg, clf: clf, norms: plainNorms(NET.norms), classScores: NET.classScores,
+        weights: { fv: NET.FEATURE_VERSION, guard: NET.guard || null, classCounts: NET.classCounts || null, reg: reg, clf: clf, norms: plainNorms(NET.norms), classScores: NET.classScores,
                    lossHistory: NET.lossHistory, lastFit: NET.lastFit, nClasses: CONTENT_CLASSES.length }
       });
       Sync.lastSave = r.ok ? new Date() : Sync.lastSave;
@@ -75,6 +75,7 @@
     const r = await S.latest(sb, c.id, 'net');
     if (!r.ok) { Sync.lastError = r.error; return { ok: false, error: r.error }; }
     if (!r.run || !r.run.weights || !r.run.weights.reg) return { ok: true, restored: false };
+    if (r.run.weights.fv !== NET.FEATURE_VERSION) return { ok: true, restored: false };   /* saved with older inputs: retrain instead of misreading */
     try {
       const w = r.run.weights;
       NET.reset();
@@ -109,6 +110,7 @@
     if (Sync.tried[c.id]) return { ok: true, restored: false };
     Sync.tried[c.id] = true;
     const r = await Sync.restoreNet(c);
+    if (window.FYLab && FYLab.autoForecast) { try { await FYLab.autoForecast(c); } catch (e) { console.warn('forecast', e); } }
     if (r.ok && r.restored) return r;
     if (typeof hasEnoughToTrain === 'function' && hasEnoughToTrain(c)) { await retrainModels(); }
     return { ok: true, restored: false };

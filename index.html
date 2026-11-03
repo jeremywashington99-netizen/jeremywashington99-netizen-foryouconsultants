@@ -589,7 +589,7 @@ code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;colo
           <div class="kpi-card"><div class="kpi-label">Best Logged Window</div><div class="kpi-value" id="a-window">--</div><div class="kpi-delta" id="a-window-d">log posts to populate</div><div class="kpi-help"><strong>What it is:</strong> the day-and-time slot where your logged posts averaged the highest engagement rate (e.g. &ldquo;Fri 6p&rdquo; = Fridays around 6pm). Each slot is the plain average of the posts logged in it, so one post can fake a winner &mdash; look for slots with 2+ posts.</div></div>
         </div>
         <div class="grid-2">
-          <div class="card"><div class="card-header"><div><div class="card-title">Forecast</div><div class="card-sub">Actual + neural projection</div></div></div><div class="chart-wrap" style="height:220px"><canvas id="c-forecast"></canvas></div></div>
+          <div class="card"><div class="card-header"><div><div class="card-title">Forecast</div><div class="card-sub" id="fc-sub">Actual + projection</div></div></div><div class="chart-wrap" style="height:220px"><canvas id="c-forecast"></canvas></div></div>
           <div class="card"><div class="card-header"><div><div class="card-title">Platform Comparison</div><div class="card-sub">Latest entered values</div></div></div><div class="chart-wrap" style="height:220px"><canvas id="c-quarterly"></canvas></div></div>
         </div>
         <div class="grid-2">
@@ -1622,6 +1622,7 @@ const Stat = {
    model.getWeights() and rendered in the AI Insights view.
 ============================================================ */
 const NET = {
+  FEATURE_VERSION:2,   /* bump when the inputs change: older saved models would read them wrongly */
   reg:null, clf:null,
   lossHistory:[], trained:false, training:false,
   metrics:{ mae:0, rmse:0, r2:0, epochs:0, params:0, backend:'', rows:0 },
@@ -1646,7 +1647,7 @@ const NET = {
     const paidShare = s.paid[i] > 0 ? 1 : 0;
     const saveRate = s.saves[i] / Math.max(1, s.reach[i]) * 100;
     return [
-      i/(s.er.length-1),                 /* time index */
+      norms.er.norm(s.er[i]),            /* this week's engagement (the week being predicted FROM) */
       norms.er.norm(prevER),             /* lag-1 engagement */
       norms.er.norm(prevER2),            /* lag-2 engagement */
       norms.fol.norm(s.followers[i]),    /* audience size */
@@ -1727,8 +1728,12 @@ const NET = {
     const EPOCHS = X.length<8 ? 300 : 220;
     /* guardrails 1 + 5: when there are enough examples, hold back the NEWEST weeks of each platform (never shuffled in) */
     let holdErr=null, trainErr=null, holdN=0;
-    const cb=()=>({ onEpochEnd:(e,logs)=>{
+    let bestVal=Infinity, sinceBest=0;
+    const cb=(watchVal)=>({ onEpochEnd:(e,logs)=>{
       this.lossHistory.push(logs.loss);
+      if (watchVal && logs.val_loss!=null){            /* early stopping: quit when held-back error stops improving for 40 rounds */
+        if (logs.val_loss<bestVal-1e-6){ bestVal=logs.val_loss; sinceBest=0; } else if (++sinceBest>=40) this.reg.stopTraining=true;
+      }
       if (onEpoch && e%10===0) onEpoch(e, EPOCHS, logs.loss);
       if (!Number.isFinite(logs.loss)) this.reg.stopTraining=true;   /* guardrail 7: halt if numbers go invalid */
     }});
@@ -1745,7 +1750,7 @@ const NET = {
         const xT=tf.tensor2d(trIdx.map(k=>X[k])), yT=tf.tensor2d(trIdx.map(k=>Y[k]));
         const xH=tf.tensor2d(hoIdx.map(k=>X[k])), yH=tf.tensor2d(hoIdx.map(k=>Y[k]));
         await this.reg.fit(xT, yT, { epochs:EPOCHS, batchSize:8, shuffle:true, verbose:0, validationData:[xH,yH],
-          callbacks:[cb(), tf.callbacks.earlyStopping({monitor:'val_loss', patience:40})] });
+          callbacks:[cb(true)] });
         const pT=Array.from(await this.reg.predict(xT).data()), pH=Array.from(await this.reg.predict(xH).data());
         trainErr=Stat.mae(trIdx.map(k=>Y[k][0]), pT); holdErr=Stat.mae(hoIdx.map(k=>Y[k][0]), pH); holdN=hoIdx.length;
         xT.dispose(); yT.dispose(); xH.dispose(); yH.dispose();
@@ -1827,7 +1832,7 @@ const NET = {
       const f=this.features({
         er, followers:synthetic.followers, reach:s.reach.concat(new Array(k).fill(s.reach[s.reach.length-1])),
         posts:synthetic.posts, paid:synthetic.paid, saves:s.saves.concat(new Array(k).fill(s.saves[s.saves.length-1]))
-      }, Math.min(i, s.er.length-1), norms);
+      }, i, norms);   /* step k looks at the week it just predicted, not always the last real one */
       const t=tf.tensor2d([f]);
       const p=this.reg.predict(t);
       const raw=(await p.data())[0];
@@ -2391,16 +2396,30 @@ async function renderAnalytics(){
     }
   } else { setText('a-window','--'); setText('a-window-d','log posts to populate'); }
 
-  let fc=[];
-  if (NET.trained) fc=await NET.forecast(c,c.primary,6);
+  let fc=[], band=null, note='Actual + projection \u00B7 not tested against past weeks yet';
+  const tested=(typeof FYLab!=='undefined'&&FYLab.testedForecast)?FYLab.testedForecast(c.id,c.primary):null;
+  if (tested){
+    fc=tested.forecast; band=tested.bands;
+    const v=tested.verdict;
+    note=v.status==='verified' ? 'Verified: typically within \u00B1'+v.miss4+' pts four weeks out ('+tested.best+')'
+        : v.status==='learning' ? 'Still learning \u2014 not verified yet. '+(v.why[0]||'')
+        : v.label+' \u2014 '+(v.headline||'');
+  } else if (NET.trained) fc=await NET.forecast(c,c.primary,6);
+  setText('fc-sub',note);
+  const pad=new Array(n-1).fill(null);
+  const ds=[
+      {label:'Actual',data:s.er.concat(new Array(fc.length).fill(null)),
+       borderColor:PLATFORMS[c.primary].color,backgroundColor:'transparent',tension:0,pointRadius:3,borderWidth:2},
+      {label:'Forecast',data:pad.concat([s.er[n-1]]).concat(fc),
+       borderColor:'#C9A84C',backgroundColor:'transparent',fill:false,tension:0,pointRadius:3,borderWidth:2,borderDash:[5,3]}
+  ];
+  if (band){
+    ds.push({label:'Likely high',data:pad.concat([s.er[n-1]]).concat(fc.map((v,i)=>+(v+band[i]).toFixed(2))),borderColor:'rgba(201,168,76,.45)',backgroundColor:'rgba(201,168,76,.14)',fill:'+1',tension:0,pointRadius:0,borderWidth:1});
+    ds.push({label:'Likely low',data:pad.concat([s.er[n-1]]).concat(fc.map((v,i)=>+Math.max(0,v-band[i]).toFixed(2))),borderColor:'rgba(201,168,76,.45)',backgroundColor:'transparent',fill:false,tension:0,pointRadius:0,borderWidth:1});
+  }
   mkChart('c-forecast','line',{
     labels: s.weeks.concat(fc.map((_,i)=>'+'+(i+1))),
-    datasets:[
-      {label:'Actual',data:s.er.concat(new Array(fc.length).fill(null)),
-       borderColor:PLATFORMS[c.primary].color,backgroundColor:'transparent',tension:.35,pointRadius:3,borderWidth:2},
-      {label:'Forecast',data:new Array(n-1).fill(null).concat([s.er[n-1]]).concat(fc),
-       borderColor:'#C9A84C',backgroundColor:'rgba(201,168,76,.16)',fill:true,tension:.35,pointRadius:3,borderWidth:2,borderDash:[5,3]}
-    ]
+    datasets:ds
   }, baseOpts(v=>v+'%'));
 
   const withData=cs.platforms.filter(pk=>cs.series[pk]&&cs.series[pk].er.length);
@@ -4778,20 +4797,21 @@ async function migrateLocalToCloud(){
   try{ localStorage.removeItem('fy_clients_v3'); }catch(e){}
 }
 </script>
-<div id="fy-build" style="position:fixed;left:8px;bottom:6px;z-index:5;font-size:10px;color:var(--text3);opacity:.7;pointer-events:none">Build 2026-11-02.5</div>
-<script src="js/dl-activations.js?v=2026-11-02.5"></script>
-<script src="js/dl-cnn.js?v=2026-11-02.5"></script>
-<script src="js/dl-rnn.js?v=2026-11-02.5"></script>
-<script src="js/dl-gan.js?v=2026-11-02.5"></script>
-<script src="js/client-backup.js?v=2026-11-02.5"></script>
-<script src="js/mkt-benchmarks.js?v=2026-11-02.5"></script>
-<script src="js/mkt-metrics.js?v=2026-11-02.5"></script>
-<script src="js/mkt-lifecycle.js?v=2026-11-02.5"></script>
-<script src="js/dl-guardrails.js?v=2026-11-02.5"></script>
-<script src="js/model-store.js?v=2026-11-02.5"></script>
-<script src="js/model-explain.js?v=2026-11-02.5"></script>
-<script src="js/model-sync.js?v=2026-11-02.5"></script>
-<script src="js/dl-lab.js?v=2026-11-02.5"></script>
-<script src="js/mkt-ui.js?v=2026-11-02.5"></script>
+<div id="fy-build" style="position:fixed;left:8px;bottom:6px;z-index:5;font-size:10px;color:var(--text3);opacity:.7;pointer-events:none">Build 2026-11-02.6</div>
+<script src="js/dl-activations.js?v=2026-11-02.6"></script>
+<script src="js/dl-cnn.js?v=2026-11-02.6"></script>
+<script src="js/dl-rnn.js?v=2026-11-02.6"></script>
+<script src="js/dl-gan.js?v=2026-11-02.6"></script>
+<script src="js/client-backup.js?v=2026-11-02.6"></script>
+<script src="js/mkt-benchmarks.js?v=2026-11-02.6"></script>
+<script src="js/mkt-metrics.js?v=2026-11-02.6"></script>
+<script src="js/mkt-lifecycle.js?v=2026-11-02.6"></script>
+<script src="js/dl-guardrails.js?v=2026-11-02.6"></script>
+<script src="js/dl-backtest.js?v=2026-11-02.6"></script>
+<script src="js/model-store.js?v=2026-11-02.6"></script>
+<script src="js/model-explain.js?v=2026-11-02.6"></script>
+<script src="js/model-sync.js?v=2026-11-02.6"></script>
+<script src="js/dl-lab.js?v=2026-11-02.6"></script>
+<script src="js/mkt-ui.js?v=2026-11-02.6"></script>
 </body>
 </html>
