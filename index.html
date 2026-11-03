@@ -609,7 +609,7 @@ code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;colo
 
       <div class="view" id="view-ai">
         <div class="page-header">
-          <div><div class="page-title">AI Insights</div><div class="page-sub">TensorFlow.js &middot; trains on your data only</div></div>
+          <div><div class="page-title">AI Insights</div><div class="page-sub">Learns from your data only &middot; every training run is saved to your database</div></div>
           <div class="header-actions">
             <button class="btn btn-ghost" onclick="exportPDF('AI Insights')">&#8681; PDF</button>
             <button class="btn btn-primary" id="btn-train" onclick="retrainModels()">&#10022; Train Model</button>
@@ -617,11 +617,11 @@ code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;colo
         </div>
         <div id="ai-plain"></div>
         <div class="card" style="margin-bottom:14px">
-          <div class="card-header"><div><div class="card-title">Network Architecture</div><div class="card-sub" id="net-status">Not trained</div></div></div>
+          <div class="card-header"><div><div class="card-title">How the forecast engine works</div><div class="card-sub" id="net-status">Not trained</div></div></div>
           <div id="net-layers"></div>
           <div class="grid-2" style="margin-top:14px;margin-bottom:0">
-            <div><div class="card-sub" style="margin-bottom:6px">Training loss (MSE)</div><div class="chart-wrap" style="height:150px"><canvas id="c-loss"></canvas></div></div>
-            <div><div class="card-sub" style="margin-bottom:6px">Predicted vs actual</div><div class="chart-wrap" style="height:150px"><canvas id="c-fit"></canvas></div></div>
+            <div><div class="card-sub" style="margin-bottom:6px">How its accuracy improved while learning</div><div class="card-sub" style="margin-bottom:6px;font-size:11px">The line should fall and then flatten. Falling means it is getting better at matching your results.</div><div class="chart-wrap" style="height:150px"><canvas id="c-loss"></canvas></div></div>
+            <div><div class="card-sub" style="margin-bottom:6px">Forecast check: what it predicted vs what happened</div><div class="card-sub" style="margin-bottom:6px;font-size:11px">Green is what really happened. Gold is what the engine expected. The closer they sit, the more you can trust it.</div><div class="chart-wrap" style="height:150px"><canvas id="c-fit"></canvas></div></div>
           </div>
         </div>
         <div id="dl-lab"></div>
@@ -1248,7 +1248,7 @@ function showSessionInfo(){
     '<div class="prev-row"><span class="prev-k">Login screen next visit</span><span class="prev-v">'+
       (LOCAL_MODE||stay ? 'skipped' : 'shown')+'</span></div>'+
     '<div class="prev-row"><span class="prev-k">Storage</span><span class="prev-v">'+
-      (LOCAL_MODE?'this browser only':'Supabase + local cache')+'</span></div>'+
+      (LOCAL_MODE?'this browser only':'Supabase only')+'</span></div>'+
     '</div>'+
     (LOCAL_MODE
       ? '<div class="callout callout-info" style="margin-top:12px">Local mode never shows a login screen on this browser. '+
@@ -1307,10 +1307,7 @@ async function applyNewPassword(){
 ============================================================ */
 async function logEvent(event,payload){
   if (LOCAL_MODE){
-    const l=JSON.parse(localStorage.getItem('fy_local_logs')||'[]');
-    l.push({event, payload:payload||{}, at:new Date().toISOString()});
-    localStorage.setItem('fy_local_logs', JSON.stringify(l.slice(-200)));
-    return;
+    return;   /* no browser-side log: events go to the database only */
   }
   if (!sb || !SESSION) return;
   try{
@@ -1394,20 +1391,19 @@ const DB = {
           demo.forEach(c=>{ try{ sb.from('clients').delete().eq('id',c.id).then(()=>{},()=>{}); }catch(e){} });
           this.clients=all.filter(c=>!this.isStarter(c));
           this.activeId=this.clients[0]?this.clients[0].id:null;
+          this.loadError=null;
           return;
         }
-      }catch(e){ console.warn('clients read failed',e); }
+        if (r.error) this.loadError=r.error.message;
+      }catch(e){ console.warn('clients read failed',e); this.loadError=e.message||String(e); }
     }
-    const local=localStorage.getItem('fy_clients_v3');
-    if (local){
-      try{ this.clients=scopeClients(JSON.parse(local)).filter(c=>!this.isStarter(c)); }catch(e){ this.clients=[]; }
-    } else {
-      this.clients=[];
-    }
+    /* Nothing is read from this browser. If the database could not be reached, say so. */
+    this.clients=[];
+    if (!(sb && SESSION)) this.loadError='Not signed in to the database.';
     this.activeId=this.clients[0]?this.clients[0].id:null;
   },
 
-  persist(){ localStorage.setItem('fy_clients_v3', JSON.stringify(this.clients)); },
+  persist(){ /* intentionally empty: client data is stored in Supabase only */ },
 
   async save(c){
     const i=this.clients.findIndex(x=>x.id===c.id);
@@ -1633,6 +1629,7 @@ const NET = {
   reset(){
     try{ if(this.reg) this.reg.dispose(); if(this.clf) this.clf.dispose(); }catch(e){}
     this.reg=null; this.clf=null; this.trained=false; this.lossHistory=[];
+    this.guard=null; this.classCounts=null;
     this.classScores={}; this.lastFit={actual:[],predicted:[],labels:[]};
     this.metrics={ mae:0, rmse:0, r2:0, epochs:0, params:0, backend:this.metrics?this.metrics.backend:'', rows:0 };
   },
@@ -1644,7 +1641,8 @@ const NET = {
   features(s, i, norms){
     const prevER  = i>0 ? s.er[i-1] : s.er[0];
     const prevER2 = i>1 ? s.er[i-2] : prevER;
-    const postRate = s.posts[i] / Math.max.apply(null, s.posts);
+    /* running maximum: only weeks up to i, so no future week leaks in (guardrail 5) */
+    const postRate = s.posts[i] / Math.max(1, Math.max.apply(null, s.posts.slice(0, i+1)));
     const paidShare = s.paid[i] > 0 ? 1 : 0;
     const saveRate = s.saves[i] / Math.max(1, s.reach[i]) * 100;
     return [
@@ -1685,17 +1683,25 @@ const NET = {
     try{ await tf.ready(); }catch(e){}
     this.metrics.backend = (tf.getBackend && tf.getBackend()) || 'cpu';
 
-    const X=[], Y=[], XC=[], YC=[];
+    const X=[], Y=[], XC=[], YC=[], TAG=[];
     const platNorms={};
+    const G=(typeof FYGuard!=='undefined')?FYGuard:null;
+    const dataIssues={issues:[],bad:{},count:0}; let leak={ok:true,leaks:[]};
 
     client.platforms.forEach(pk=>{
       const s=client.series[pk]; if(!s) return;
       const norms={ er:Stat.minmax(s.er), fol:Stat.minmax(s.followers), reach:Stat.minmax(s.reach) };
       platNorms[pk]=norms;
+      /* guardrails 4 + 5: skip impossible/missing weeks, and prove week i never sees week i+1 */
+      const vs=G?G.validateSeries(s):{issues:[],bad:{}};
+      vs.issues.forEach(x=>dataIssues.issues.push(Object.assign({platform:pk},x)));
+      if (G){ const lp=G.leakProbe((q,i,n)=>this.features(q,i,n), s, norms); if(!lp.ok){ leak.ok=false; leak.leaks=leak.leaks.concat(lp.leaks); } }
       /* supervised pairs: features(week i) -> engagement(week i+1) */
       for(let i=0;i<s.er.length-1;i++){
-        X.push(this.features(s,i,norms));
-        Y.push([norms.er.norm(s.er[i+1])]);
+        if (vs.bad[i]||vs.bad[i+1]) continue;
+        const f=this.features(s,i,norms), y=norms.er.norm(s.er[i+1]);
+        if (!f.every(Number.isFinite) || !Number.isFinite(y)) continue;
+        X.push(f); Y.push([y]); TAG.push({pk:pk,i:i});
       }
       /* classifier: logged posts give (features, content class) pairs */
       (client.posts_log||[]).filter(p=>p.platform===pk).forEach((p,idx)=>{
@@ -1719,17 +1725,41 @@ const NET = {
 
     const xs=tf.tensor2d(X), ys=tf.tensor2d(Y);
     const EPOCHS = X.length<8 ? 300 : 220;
-    await this.reg.fit(xs, ys, {
-      epochs:EPOCHS, batchSize:8, shuffle:true, verbose:0,
-      callbacks:{ onEpochEnd:(e,logs)=>{
-        this.lossHistory.push(logs.loss);
-        if (onEpoch && e%10===0) onEpoch(e, EPOCHS, logs.loss);
-      }}
-    });
+    /* guardrails 1 + 5: when there are enough examples, hold back the NEWEST weeks of each platform (never shuffled in) */
+    let holdErr=null, trainErr=null, holdN=0;
+    const cb=()=>({ onEpochEnd:(e,logs)=>{
+      this.lossHistory.push(logs.loss);
+      if (onEpoch && e%10===0) onEpoch(e, EPOCHS, logs.loss);
+      if (!Number.isFinite(logs.loss)) this.reg.stopTraining=true;   /* guardrail 7: halt if numbers go invalid */
+    }});
+    const plainFit=()=>this.reg.fit(xs, ys, { epochs:EPOCHS, batchSize:8, shuffle:true, verbose:0, callbacks:[cb()] });
+    if (G && X.length>=G.MIN_FOR_HOLDOUT){
+      const trIdx=[], hoIdx=[];
+      const byPk={}; TAG.forEach((t,k)=>{ (byPk[t.pk]=byPk[t.pk]||[]).push(k); });
+      Object.keys(byPk).forEach(pk=>{
+        const ks=byPk[pk];
+        if (ks.length<G.MIN_FOR_HOLDOUT/2){ ks.forEach(k=>trIdx.push(k)); return; }
+        const sp=G.timeSplit(ks.length); sp.train.forEach(j=>trIdx.push(ks[j])); sp.hold.forEach(j=>hoIdx.push(ks[j]));
+      });
+      if (hoIdx.length>=2 && trIdx.length>=6){
+        const xT=tf.tensor2d(trIdx.map(k=>X[k])), yT=tf.tensor2d(trIdx.map(k=>Y[k]));
+        const xH=tf.tensor2d(hoIdx.map(k=>X[k])), yH=tf.tensor2d(hoIdx.map(k=>Y[k]));
+        await this.reg.fit(xT, yT, { epochs:EPOCHS, batchSize:8, shuffle:true, verbose:0, validationData:[xH,yH],
+          callbacks:[cb(), tf.callbacks.earlyStopping({monitor:'val_loss', patience:40})] });
+        const pT=Array.from(await this.reg.predict(xT).data()), pH=Array.from(await this.reg.predict(xH).data());
+        trainErr=Stat.mae(trIdx.map(k=>Y[k][0]), pT); holdErr=Stat.mae(hoIdx.map(k=>Y[k][0]), pH); holdN=hoIdx.length;
+        xT.dispose(); yT.dispose(); xH.dispose(); yH.dispose();
+        /* the honest numbers are measured; now let it also learn from the newest weeks */
+        await this.reg.fit(xs, ys, { epochs:20, batchSize:8, shuffle:true, verbose:0, callbacks:[cb()] });
+      } else await plainFit();
+    } else await plainFit();
+    if (this.lossHistory.some(v=>!Number.isFinite(v))) { this.training=false; throw new Error('Learning broke down (invalid numbers appeared). Check the data for extreme values and retry.'); }
 
     if (XC.length>=3){
       const xc=tf.tensor2d(XC), yc=tf.tensor2d(YC);
-      await this.clf.fit(xc, yc, {epochs:180, batchSize:4, shuffle:true, verbose:0});
+      const counts=new Array(CONTENT_CLASSES.length).fill(0); YC.forEach(r=>{ counts[r.indexOf(1)]++; });
+      this.classCounts=counts;   /* guardrail 3: rare content types get extra weight */
+      await this.clf.fit(xc, yc, {epochs:180, batchSize:4, shuffle:true, verbose:0, classWeight: G?G.classWeights(counts):undefined});
       xc.dispose(); yc.dispose();
     }
 
@@ -1743,7 +1773,7 @@ const NET = {
     let ssRes=0, ssTot=0;
     for(let i=0;i<av.length;i++){ ssRes+=(av[i]-pv[i])**2; ssTot+=(av[i]-my)**2; }
     this.metrics.r2 = ssTot===0?0:1-ssRes/ssTot;
-    this.metrics.epochs = EPOCHS;
+    this.metrics.epochs = this.lossHistory.length;
     this.metrics.rows = X.length;
     this.metrics.params = this.reg.countParams() + (this.clf?this.clf.countParams():0);
     this.lastFit={ actual:av, predicted:pv, labels:av.map((_,i)=>'s'+(i+1)) };
@@ -1764,6 +1794,16 @@ const NET = {
       t.dispose(); out.dispose();
     });
 
+    /* the ten accuracy safeguards, kept with this run */
+    try{
+      if (G){
+        const primary=client.primary&&client.series[client.primary]?client.primary:client.platforms[0];
+        const health=G.weightsHealth(this.reg.getWeights().map(w=>w.dataSync()));
+        this.guard=G.audit({ history:this.lossHistory, trainErr:trainErr, holdErr:holdErr, holdN:holdN, r2:this.metrics.r2, rows:X.length,
+          classCounts:XC.length>=3?this.classCounts:null, dataIssues:dataIssues, leak:leak, health:health,
+          drift:G.drift(client.series[primary]), scale:G.scaling(X), weeks:client.series[primary].er.length });
+      }
+    }catch(e){ console.warn('guardrail audit failed',e); this.guard=null; }
     logEvent('model_trained', {
       client:client.id, mae:+this.metrics.mae.toFixed(4),
       r2:+this.metrics.r2.toFixed(4), params:this.metrics.params
@@ -2411,19 +2451,20 @@ async function renderAnalytics(){
 ============================================================ */
 async function renderAI(){
   const c=DB.active();
+  if (c && typeof FYSync!=='undefined' && !NET.training && !FYSync.tried[c.id] && !NET.trained) { setTimeout(()=>FYSync.ensureNet(c).then(()=>renderAI()).catch(e=>{NET.lastError=e.message;}),0); }
   const layers=NET.describe();
   renderAIPlain(c);
+  const syncOK=(typeof FYSync!=='undefined');
+  if (c && syncOK && NET.clientId && NET.clientId!==c.id){ NET.reset(); NET.clientId=c.id; }
   setText('net-status', NET.trained
-    ? ('Trained \u00B7 '+NET.metrics.params+' parameters \u00B7 '+NET.metrics.epochs+' epochs \u00B7 '+NET.metrics.rows+' training pairs \u00B7 '+NET.metrics.backend)
-    : (c && hasEnoughToTrain(c) ? 'Ready to train'
-        : 'Needs 4 weeks to train \u2014 the forecast and scorecard above work from your first entry'));
-
-  setHTML('net-layers', layers.length? layers.map(l=>
-    '<div class="net-layer" title="'+esc(plainLayer(l))+'"><span style="color:var(--text2);font-family:monospace;font-size:11px">'+l.head+'</span>'+
-    '<strong style="font-size:12px">'+l.name+'</strong>'+
-    '<span class="net-act">'+l.activation+'</span>'+
-    '<span class="net-shape">W '+l.weights+' \u00B7 b '+l.bias+' \u00B7 '+l.params+' params</span></div>').join('')
-    : '<div class="callout callout-info">The network is built when you train it. It learns only from the weeks and posts you enter \u2014 with fewer than 4 weeks there is nothing meaningful to fit.</div>');
+    ? ('Trained on '+NET.metrics.rows+' week-to-week examples from your results')
+    : (NET.training ? 'Learning from your results\u2026'
+    : (NET.lastError ? 'Training did not finish'
+    : (c && hasEnoughToTrain(c) ? 'Ready to learn from your results'
+        : 'Needs 4 weeks of results to learn \u2014 the forecast and scorecard above work from your first entry'))));
+  if (NET.trained && syncOK) setHTML('net-layers', FYSync.netPanelHTML(c));
+  else if (NET.lastError) setHTML('net-layers','<div class="callout callout-warn"><strong>Training did not finish.</strong> '+esc(NET.lastError)+'<br/>Press <strong>Train Model</strong> to try again.</div>');
+  else setHTML('net-layers','<div class="callout callout-info">'+(NET.training?'The engine is learning from your weekly results now. This takes a few seconds.':'The forecast engine studies your weekly results and the posts you log, then predicts where engagement is heading. It needs at least 4 weeks to find a pattern.')+'</div>');
 
   if (NET.lossHistory.length){
     mkChart('c-loss','line',{labels:NET.lossHistory.map((_,i)=>i),
@@ -2509,21 +2550,41 @@ async function retrainModels(){
   const c=DB.active();
   if (!c){ toast('No client selected','error'); return; }
   if (!hasEnoughToTrain(c)){
-    toast('Need at least 4 weeks of data to train','error',4200);
+    toast('Need at least 4 weeks of results to learn from','error',4200);
     renderAI(); return;
   }
+  if (NET.clientId && NET.clientId!==c.id) NET.reset();
+  NET.clientId=c.id; NET.lastError=null;
   const btn=document.getElementById('btn-train');
-  if (btn){ btn.disabled=true; btn.textContent='Training...'; }
+  if (btn){ btn.disabled=true; btn.textContent='Learning...'; }
+  const run=()=>NET.train(c,(e,total,loss)=>{
+    setText('net-status','Learning from your results \u00B7 '+Math.round(e/total*100)+'% done');
+    if (btn) btn.textContent='Learning '+Math.round(e/total*100)+'%';
+  });
   try{
-    await NET.train(c,(e,total,loss)=>{
-      setText('net-status','Epoch '+e+' / '+total+' \u00B7 loss '+loss.toFixed(5));
-      if (btn) btn.textContent='Training '+Math.round(e/total*100)+'%';
-    });
-    toast('Trained on '+NET.metrics.rows+' pairs \u00B7 R\u00B2 '+NET.metrics.r2.toFixed(3),'success',4200);
+    try{ await run(); if(!NET.trained) throw new Error('training stopped before it finished'); }
+    catch(first){
+      /* a graphics-card (WebGL) hiccup is the usual cause: retry on the plain processor */
+      NET.training=false;
+      if (tf.getBackend && tf.getBackend()!=='cpu'){
+        console.warn('training failed on '+tf.getBackend()+', retrying on cpu',first);
+        await tf.setBackend('cpu'); await tf.ready(); await run();
+        if(!NET.trained) throw first;
+      } else throw first;
+    }
+    if (typeof FYSync!=='undefined'){
+      await FYSync.fillForecasts(c);
+      setText('net-status','Saving to your database\u2026');
+      const r=await FYSync.saveNet(c);
+      if (r.superseded) return;
+      if (r.ok){ NET.savedAt=new Date().toISOString(); NET.savedRun={data_weeks:weekCount(c),data_posts:(c.posts_log||[]).length}; toast('Learned from '+NET.metrics.rows+' examples and saved to your database','success',4200); }
+      else toast('Trained, but NOT saved to the database: '+r.error,'error',8000);
+    }
     await renderAI(); await renderDashboard();
   }catch(e){
-    console.error(e); toast('Training failed: '+e.message,'error');
-    setText('net-status','Training failed');
+    console.error(e); NET.training=false; NET.lastError=e.message||String(e);
+    toast('Training failed: '+NET.lastError,'error',8000);
+    try{ await renderAI(); }catch(_){}
   }
   if (btn){ btn.disabled=false; btn.innerHTML='\u2726 Train Model'; }
 }
@@ -3533,11 +3594,15 @@ function renderReports(){
       '<button class="btn btn-primary" style="font-size:12px" onclick="exportPDF(\''+r.title+'\')">\u2193 PDF</button>'+
       '<button class="btn btn-ghost" style="font-size:12px" onclick="shareReport(\''+r.title+'\')">\u2709 Share</button>'+
     '</div></div>').join(''));
-  const sched=JSON.parse(localStorage.getItem('fy_schedules')||'[]');
-  setHTML('schedule-body', sched.length? sched.map(s=>
-    '<tr><td>'+esc(s.name)+'</td><td>'+esc(s.freq)+'</td><td>'+esc(s.email)+'</td>'+
-    '<td>'+esc(s.formats.join(' + '))+'</td><td><span class="badge badge-green">Saved</span></td></tr>').join('')
+  const draw=(sched,err)=>setHTML('schedule-body', err ? '<tr><td colspan="5" style="text-align:center;color:var(--red);padding:20px">Could not load schedules: '+esc(err)+'</td></tr>'
+    : sched.length? sched.map(s=>
+    '<tr><td>'+esc(s.name)+'</td><td>'+esc(s.frequency)+'</td><td>'+esc((s.recipients||[]).join(', '))+'</td>'+
+    '<td>'+esc((s.formats||[]).map(f=>String(f).toUpperCase()).join(' + '))+'</td><td><span class="badge badge-green">Saved</span></td></tr>').join('')
     : '<tr><td colspan="5" style="text-align:center;color:var(--text2);padding:20px">No schedules saved</td></tr>');
+  draw([],null);
+  if (sb && SESSION){
+    sb.from('report_schedules').select('*').order('created_at',{ascending:true}).then(r=>draw(r.data||[], r.error?r.error.message:null), e=>draw([],e.message));
+  }
 }
 function shareReport(title){
   showModal('Share report',
@@ -3565,19 +3630,20 @@ function openSchedule(){
       '<label class="chk"><input type="checkbox" class="sc-f" value="PDF" checked/> PDF</label>'+
       '<label class="chk"><input type="checkbox" class="sc-f" value="CSV"/> CSV</label>'+
       '<label class="chk"><input type="checkbox" class="sc-f" value="Word"/> Word</label></div></div>'+
-    '<div class="callout callout-info">Saved locally as a reminder. Automated sending needs the server build.</div>',
+    '<div class="callout callout-info">Saved to your database. Automated sending needs the server build.</div>',
     '<button class="btn btn-ghost" onclick="closeModal()">Cancel</button>'+
     '<button class="btn btn-primary" onclick="saveSchedule()">Save</button>');
 }
-function saveSchedule(){
+async function saveSchedule(){
   const name=(document.getElementById('sc-name')||{}).value||'Report';
   const freq=(document.getElementById('sc-freq')||{}).value||'Weekly';
   const email=(document.getElementById('sc-email')||{}).value||'';
-  const formats=Array.prototype.slice.call(document.querySelectorAll('.sc-f:checked')).map(x=>x.value);
-  const list=JSON.parse(localStorage.getItem('fy_schedules')||'[]');
-  list.push({name,freq,email,formats:formats.length?formats:['PDF']});
-  localStorage.setItem('fy_schedules',JSON.stringify(list));
-  closeModal(); renderReports(); toast('Schedule saved','success');
+  const fm=Array.prototype.slice.call(document.querySelectorAll('.sc-f:checked')).map(x=>x.value.toLowerCase());
+  if (!(sb && SESSION)){ toast('Not connected to the database \u2014 schedule not saved','error',6000); return; }
+  const r=await sb.from('report_schedules').insert({ owner_id:SESSION.user.id, client_id:DB.activeId||null, name:name, frequency:freq,
+    recipients:email?[email]:[], formats:fm.length?fm:['pdf'] });
+  if (r.error){ toast('Schedule NOT saved: '+r.error.message,'error',7000); return; }
+  closeModal(); renderReports(); toast('Schedule saved to your database','success');
 }
 
 /* ============================================================
@@ -3735,7 +3801,9 @@ async function launchApp(){
     paintLockState();
 
     const c=DB.active();
-    if (c && hasEnoughToTrain(c)) retrainModels();
+    /* reuse the last saved run from the database; only train if none exists */
+    if (c && typeof FYSync!=='undefined') FYSync.ensureNet(c).then(r=>{ if(r&&r.restored){ try{ renderDashboard(); renderAI(); }catch(e){} } }).catch(e=>{ NET.lastError=e.message; });
+    else if (c && hasEnoughToTrain(c)) retrainModels();
   },300);
 }
 
@@ -4270,10 +4338,7 @@ async function saveCredential(){
 /* ============================================================
    TIME RANGE  -  Day / Week / Month / All time
 ============================================================ */
-let RANGE=(function(){
-  try{ const v=localStorage.getItem('fy_range'); return ['day','week','month','all'].indexOf(v)>-1 ? v : 'all'; }
-  catch(e){ return 'all'; }
-})();
+let RANGE='all';
 const RANGES={
   day:  {label:'last 24 hours', days:1},
   week: {label:'last 7 days',   days:7},
@@ -4312,7 +4377,6 @@ function syncRangeButtons(){
 function setRange(r){
   if(!RANGES[r]) return;
   RANGE=r;
-  try{ localStorage.setItem('fy_range',r); }catch(e){}
   syncRangeButtons();
   renderDashboard();
   renderAnalytics();
@@ -4462,7 +4526,7 @@ function renderAIPlain(c){
   const wrap=(inner)=>'<div class="card plain-card" style="margin-bottom:14px"><div class="card-header"><div><div class="card-title">📖 In plain English</div>'+
     '<div class="card-sub">What the numbers below mean and how far to trust them</div></div></div>'+inner+'</div>';
   if(!NET.trained){
-    el.innerHTML=wrap('<ul class="plain-list"><li><span class="pl-k">🧠 What this is</span>A small neural network that learns from <em>only your own weekly entries</em> and tries to guess next week’s engagement rate. It runs inside your browser — nothing is sent anywhere.</li>'+
+    el.innerHTML=wrap('<ul class="plain-list"><li><span class="pl-k">🧠 What this is</span>A small neural network that learns from <em>only your own weekly entries</em> and tries to guess next week’s engagement rate. Each time it learns, the result is saved to your database so it is there on any device.</li>'+
       '<li><span class="pl-k">▶ To start</span>Enter at least <strong>4 weeks</strong> of data, then press <strong>Train Model</strong>.</li></ul>');
     return;
   }
@@ -4667,7 +4731,7 @@ async function migrateLocalToCloud(){
   if (LOCAL_MODE || !(typeof sb!=='undefined' && sb && SESSION)) return;
   let local=[];
   try{ local=JSON.parse(localStorage.getItem('fy_clients_v3')||'[]'); }catch(e){ return; }
-  if (!Array.isArray(local) || !local.length) return;
+  if (!Array.isArray(local) || !local.length){ try{ localStorage.removeItem('fy_clients_v3'); }catch(e){} return; }
   let moved=0, wk=0, ps=0;
   for (const lc of local){
     if (!lc || !lc.id || DB.isStarter(lc)) continue;
@@ -4710,18 +4774,24 @@ async function migrateLocalToCloud(){
     moved++;
   }
   if (moved){ toast('Copied '+moved+' client(s) from this device to your cloud account ('+wk+' weeks, '+ps+' posts)','success',6000); logEvent('local_migrated',{clients:moved,weeks:wk,posts:ps}); }
+  /* everything is now in the database; remove the old browser copy */
+  try{ localStorage.removeItem('fy_clients_v3'); }catch(e){}
 }
 </script>
-<div id="fy-build" style="position:fixed;left:8px;bottom:6px;z-index:5;font-size:10px;color:var(--text3);opacity:.7;pointer-events:none">Build 2026-11-02.4</div>
-<script src="js/dl-activations.js?v=2026-11-02.4"></script>
-<script src="js/dl-cnn.js?v=2026-11-02.4"></script>
-<script src="js/dl-rnn.js?v=2026-11-02.4"></script>
-<script src="js/dl-gan.js?v=2026-11-02.4"></script>
-<script src="js/client-backup.js?v=2026-11-02.4"></script>
-<script src="js/mkt-benchmarks.js?v=2026-11-02.4"></script>
-<script src="js/mkt-metrics.js?v=2026-11-02.4"></script>
-<script src="js/mkt-lifecycle.js?v=2026-11-02.4"></script>
-<script src="js/dl-lab.js?v=2026-11-02.4"></script>
-<script src="js/mkt-ui.js?v=2026-11-02.4"></script>
+<div id="fy-build" style="position:fixed;left:8px;bottom:6px;z-index:5;font-size:10px;color:var(--text3);opacity:.7;pointer-events:none">Build 2026-11-02.5</div>
+<script src="js/dl-activations.js?v=2026-11-02.5"></script>
+<script src="js/dl-cnn.js?v=2026-11-02.5"></script>
+<script src="js/dl-rnn.js?v=2026-11-02.5"></script>
+<script src="js/dl-gan.js?v=2026-11-02.5"></script>
+<script src="js/client-backup.js?v=2026-11-02.5"></script>
+<script src="js/mkt-benchmarks.js?v=2026-11-02.5"></script>
+<script src="js/mkt-metrics.js?v=2026-11-02.5"></script>
+<script src="js/mkt-lifecycle.js?v=2026-11-02.5"></script>
+<script src="js/dl-guardrails.js?v=2026-11-02.5"></script>
+<script src="js/model-store.js?v=2026-11-02.5"></script>
+<script src="js/model-explain.js?v=2026-11-02.5"></script>
+<script src="js/model-sync.js?v=2026-11-02.5"></script>
+<script src="js/dl-lab.js?v=2026-11-02.5"></script>
+<script src="js/mkt-ui.js?v=2026-11-02.5"></script>
 </body>
 </html>

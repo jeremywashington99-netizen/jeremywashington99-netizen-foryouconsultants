@@ -17,7 +17,7 @@
   window.FYLab = LAB;
 
   function el(id) { return document.getElementById(id); }
-  function platName(pk) { return (typeof PLATFORMS !== 'undefined' && PLATFORMS[pk] && PLATFORMS[pk].name) || pk; }
+  function platName(pk) { return (typeof PLATFORMS !== 'undefined' && PLATFORMS[pk] && (PLATFORMS[pk].label || PLATFORMS[pk].name)) || pk; }
   function client() { return DB.active(); }
   function platformsWithWeeks(c, min) {
     return (c && c.platforms || []).filter(function (pk) { const s = c.series[pk]; return s && s.er && s.er.length >= min; });
@@ -42,7 +42,7 @@
     box.innerHTML =
       '<div class="card" style="margin-bottom:14px">' +
       '<div class="card-header"><div><div class="card-title">Deep Learning Lab</div>' +
-      '<div class="card-sub">Hidden layers ReLU / Leaky ReLU &middot; output activation matched to each goal &middot; runs in your browser, trains on this client only</div></div></div>' +
+      '<div class="card-sub">Hidden layers ReLU / Leaky ReLU &middot; output activation matched to each goal &middot; every run is saved to your database, trains on this client only</div></div></div>' +
       '<div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:14px">' +
       tabs.map(function (t) {
         return '<button class="btn ' + (LAB.tab === t[0] ? 'btn-primary' : 'btn-ghost') + '" style="font-size:12px;padding:6px 12px" onclick="FYLab.show(\'' + t[0] + '\')">' + t[1] + '</button>';
@@ -51,43 +51,154 @@
   };
   LAB.show = function (t) { LAB.tab = t; LAB.render(); };
 
-  /* ---------- RNN ---------- */
+  /* ---------- RNN: the weekly forecast, in marketing terms ---------- */
+  const Store = window.FYStore, Ex = window.FYExplain;
+  function ownerId() { return SESSION && SESSION.user ? SESSION.user.id : null; }
+  function erIndex() { return R.FEATURES.indexOf(R.TARGET); }
+
+  function platformReport(c, pk) {
+    const s = c.series[pk], t = LAB.rnn;
+    const f = R.forecastRNN(tf, t, s, pk, 4).map(function (v) { return Math.max(0, v); });
+    const posts = (c.posts_log || []).filter(function (p) { return p.platform === pk; });
+    return Ex.explainForecast({ platform: pk, platformLabel: platName(pk), series: s, forecast: f, posts: posts,
+      classNames: CONTENT_CLASSES, missPoints: Ex.missInPoints(t.maeScaled, t.scalers[pk], erIndex()) });
+  }
+  function reportHTML(r) {
+    if (!r.ok) return '<div class="callout callout-info" style="margin-top:12px">' + esc(r.headline) + '</div>';
+    const col = r.direction === 'up' ? 'var(--green)' : r.direction === 'down' ? 'var(--amber)' : 'var(--text)';
+    const rel = r.reliability;
+    const relCol = rel.level === 'strong' ? 'var(--green)' : rel.level === 'useful' ? 'var(--green)' : rel.level === 'early' ? 'var(--amber)' : 'var(--amber)';
+    const rows = r.rows.map(function (x) {
+      return '<tr><td>In ' + x.week + ' week' + (x.week === 1 ? '' : 's') + '</td><td><strong>' + x.expected + '%</strong></td><td>' +
+        (x.low == null ? '&mdash;' : x.low + '% to ' + x.high + '%') + '</td></tr>';
+    }).join('');
+    return '<div style="margin-top:14px;padding:14px;border:1px solid var(--border);border-radius:10px">' +
+      '<div style="font-size:15px;font-weight:600;color:' + col + '">' + esc(r.headline) + '</div>' +
+      '<div style="overflow-x:auto;margin:10px 0"><table class="data-table"><thead><tr><th>When</th><th>Expected engagement</th><th>Likely range</th></tr></thead><tbody>' + rows + '</tbody></table></div>' +
+      '<div style="margin-bottom:10px"><span class="badge" style="color:' + relCol + '">' + esc(rel.label) + '</span> ' +
+      '<span class="card-sub">' + esc(rel.why.join(' ')) + '</span></div>' +
+      '<div class="card-sub" style="margin-bottom:10px">' + esc(r.learnedFrom) + '</div>' +
+      '<div style="font-weight:600;margin-bottom:4px">What to do next</div><ul class="plain-list" style="margin:0 0 0 18px">' +
+      r.doNext.map(function (d) { return '<li>' + esc(d) + '</li>'; }).join('') + '</ul></div>';
+  }
+
   function renderRNN() {
     const c = client();
     const ready = platformsWithWeeks(c, 4);
-    let h = '<div class="callout callout-info" style="margin-bottom:12px">An LSTM reads the last few weeks of each platform (engagement, followers, reach, posts, saves, paid boost) and predicts next week’s engagement rate. Output is <strong>linear</strong> because engagement rate is a continuous number.</div>';
-    if (!ready.length) { setHTML('dl-pane', h + '<div class="callout callout-warn">Needs at least 4 weeks on one platform.</div>'); return; }
-    h += '<button class="btn btn-primary" id="rnn-btn" onclick="FYLab.trainRNN()">Train RNN</button> <span class="card-sub" id="rnn-status"></span>';
-    if (LAB.rnn && LAB.rnnClient === c.id) {
-      h += '<div class="grid-2" style="margin-top:14px;margin-bottom:0"><div><div class="card-sub" style="margin-bottom:6px">Training loss</div><div class="chart-wrap" style="height:150px"><canvas id="c-rnn-loss"></canvas></div></div><div id="rnn-forecast"></div></div>';
-      h += auditHTML(LAB.rnn.model, 'regression', 'RNN layers');
+    let h = '<div class="callout callout-info" style="margin-bottom:12px"><strong>Weekly engagement forecast.</strong> This reads the last few weeks of each platform &mdash; engagement, followers, reach, posting frequency, saves and paid boosts &mdash; and projects where engagement is heading over the next 4 weeks, with a realistic range. Every time it learns, the result is saved to your database.</div>';
+    if (!ready.length) { setHTML('dl-pane', h + '<div class="callout callout-warn">Needs at least 4 weeks of results on one platform.</div>'); return; }
+    h += '<button class="btn btn-primary" id="rnn-btn" onclick="FYLab.trainRNN()">Update forecast</button> <span class="card-sub" id="rnn-status">' +
+      (LAB.rnnLoading ? 'Loading your saved forecast&hellip;' : '') + '</span>';
+    const live = LAB.rnn && LAB.rnnClient === c.id;
+    if (LAB.rnnError) h += '<div class="callout callout-warn" style="margin-top:12px"><strong>The forecast did not finish.</strong> ' + esc(LAB.rnnError) + '</div>';
+    if (live) {
+      h += LAB.rnn.platforms.map(function (pk) { try { return reportHTML(platformReport(c, pk)); } catch (e) { return ''; } }).join('');
+      const st = Store.staleness(LAB.rnnRun, Math.max.apply(null, ready.map(function (pk) { return c.series[pk].er.length; })), (c.posts_log || []).length);
+      h += '<div class="card-sub" style="margin-top:10px">' + (LAB.rnnSaveError
+        ? '<span style="color:var(--red)">Not saved to the database: ' + esc(LAB.rnnSaveError) + '</span>'
+        : LAB.rnnSavedAt ? '<span style="color:var(--green)">&#10003; Saved to your database ' + esc(new Date(LAB.rnnSavedAt).toLocaleString()) + '</span>' : '') +
+        (st.stale ? ' &middot; ' + esc(st.reason) + ' &mdash; press Update forecast.' : '') + '</div>';
+      if (LAB.rnnGuard && window.FYGuard) h += FYGuard.html(LAB.rnnGuard, esc);
+      h += '<details style="margin-top:10px"><summary class="card-sub" style="cursor:pointer">Technical detail (for analysts)</summary>' +
+        '<div class="card-sub" style="margin:8px 0">Learned from ' + LAB.rnn.windows + ' examples of ' + LAB.rnn.lookback + ' weeks in a row.</div>' +
+        '<div class="chart-wrap" style="height:150px"><canvas id="c-rnn-loss"></canvas></div>' +
+        techTable(LAB.rnn.model) + '</details>';
     }
     setHTML('dl-pane', h);
-    if (LAB.rnn && LAB.rnnClient === c.id) {
+    if (live) {
       mkChart('c-rnn-loss', 'line', { labels: LAB.rnn.history.map(function (_, i) { return i; }),
         datasets: [{ data: LAB.rnn.history, borderColor: '#4FC3F7', pointRadius: 0, borderWidth: 2, tension: .3 }] }, baseOpts(function (v) { return v.toFixed(3); }));
-      const rows = LAB.rnn.platforms.map(function (pk) {
-        const s = c.series[pk], f = R.forecastRNN(tf, LAB.rnn, s, pk, 4);
-        return '<tr><td>' + esc(platName(pk)) + '</td><td>' + s.er[s.er.length - 1] + '%</td>' + f.map(function (v) { return '<td>' + Math.max(0, v) + '%</td>'; }).join('') + '</tr>';
-      }).join('');
-      setHTML('rnn-forecast', '<div class="card-sub" style="margin-bottom:6px">Engagement forecast (next 4 weeks)</div><div style="overflow-x:auto"><table class="data-table"><thead><tr><th>Platform</th><th>Last</th><th>+1</th><th>+2</th><th>+3</th><th>+4</th></tr></thead><tbody>' + rows + '</tbody></table></div>');
-      setText('rnn-status', 'Trained on ' + LAB.rnn.windows + ' windows of ' + LAB.rnn.lookback + ' weeks');
-    }
+    } else if (!LAB.rnnLoading && !LAB.rnnTried[c.id]) { LAB.loadSavedRNN(); }
   }
+
+  /* Plain-English layer table; the exact layer names sit in the last column for analysts. */
+  function techTable(model) {
+    const a = A.auditModel(model, 'regression');
+    const row = function (name, type, role, act) {
+      const p = Ex.layerPlain({ type: type, role: role, activation: act }), ap = Ex.activationPlain(act);
+      return '<tr><td>' + esc(p.stage) + '</td><td>' + esc(p.does) + '</td><td>' + esc(ap.label) + (ap.plain ? ' &mdash; ' + esc(ap.plain) : '') + '</td><td style="font-family:monospace;font-size:11px;color:var(--text2)">' + esc(name) + '</td></tr>';
+    };
+    const rows = a.hidden.map(function (h) { return row(h.name, h.type, 'hidden', h.activation); }).join('') + row(a.output.name, 'Dense', 'output', a.output.activation);
+    return '<div class="card-sub" style="margin:8px 0">' + (a.ok ? '<span style="color:var(--green)">Uses only the approved activation rules</span>' : '<span style="color:var(--red)">' + esc(a.problems.join('; ')) + '</span>') +
+      ' &middot; ' + model.countParams().toLocaleString() + ' adjustable values</div>' +
+      '<div style="overflow-x:auto"><table class="data-table"><thead><tr><th>Stage</th><th>What it does</th><th>Rule it uses</th><th>Layer</th></tr></thead><tbody>' + rows + '</tbody></table></div>';
+  }
+
+  /* The same ten safeguards, for the weekly forecast. */
+  function rnnGuard(c, t) {
+    const G = window.FYGuard; if (!G) return null;
+    const issues = { issues: [], bad: {} };
+    t.platforms.forEach(function (pk) { G.validateSeries(c.series[pk]).issues.forEach(function (x) { issues.issues.push(Object.assign({ platform: pk }, x)); }); });
+    const pk0 = t.platforms[0];
+    let rows = [];
+    t.platforms.forEach(function (pk) { rows = rows.concat(R.scaleMatrix(R.seriesToMatrix(c.series[pk]), t.scalers[pk])); });
+    return G.audit({ history: t.history, trainErr: t.maeScaled, holdErr: null, holdN: 0, r2: null, rows: t.windows, classCounts: null,
+      dataIssues: issues, leak: null, health: G.weightsHealth(t.model.getWeights().map(function (w) { return w.dataSync(); })),
+      drift: G.drift(c.series[pk0]), scale: G.scaling(rows), weeks: c.series[pk0].er.length });
+  }
+
+  LAB.rnnTried = {};
+  LAB.loadSavedRNN = async function () {
+    const c = client(); if (!c || !Store) return;
+    LAB.rnnTried[c.id] = true; LAB.rnnLoading = true; renderRNN();
+    try {
+      const r = await Store.latest(sb, c.id, 'rnn');
+      if (r.ok && r.run && r.run.weights && r.run.weights.model) {
+        const w = r.run.weights;
+        if (LAB.rnn) LAB.rnn.model.dispose();
+        LAB.rnn = { model: await Store.restoreModel(tf, w.model), scalers: w.scalers, lookback: w.lookback, platforms: w.platforms,
+                    history: w.history || [], windows: w.windows, task: w.task || 'regression', maeScaled: w.maeScaled };
+        LAB.rnnGuard = w.guard || null;
+        LAB.rnnClient = c.id; LAB.rnnRun = r.run; LAB.rnnSavedAt = r.run.trained_at; LAB.rnnSaveError = null;
+      } else if (!r.ok) LAB.rnnError = 'Could not load your saved forecast: ' + r.error;
+    } catch (e) { LAB.rnnError = 'Could not rebuild the saved forecast: ' + e.message; }
+    LAB.rnnLoading = false; renderRNN();
+  };
+
   LAB.trainRNN = async function () {
     const c = client(); const btn = el('rnn-btn');
     const series = {}; platformsWithWeeks(c, 4).forEach(function (pk) { series[pk] = c.series[pk]; });
-    if (btn) { btn.disabled = true; btn.textContent = 'Training...'; }
+    if (btn) { btn.disabled = true; btn.textContent = 'Learning...'; }
+    LAB.rnnError = null; LAB.rnnSaveError = null;
     try {
       if (LAB.rnn) LAB.rnn.model.dispose();
-      LAB.rnn = await R.trainRNN(tf, series, { epochs: 150, onEpoch: function (e, n, logs) {
-        if (e % 10 === 0) setText('rnn-status', 'Epoch ' + e + ' / ' + n + ' · loss ' + logs.loss.toFixed(4)); } });
-      LAB.rnnClient = c.id;
-      logEvent('rnn_trained', { client: c.id, windows: LAB.rnn.windows, lookback: LAB.rnn.lookback });
-      toast('RNN trained', 'success');
-    } catch (e) { LAB.rnn = null; toast('RNN training failed: ' + e.message, 'error', 6000); }
+      LAB.rnn = null;
+      const t = await R.trainRNN(tf, series, { epochs: 150, onEpoch: function (e, n) {
+        if (e % 10 === 0) setText('rnn-status', 'Learning from your results · ' + Math.round(e / n * 100) + '% done'); } });
+      LAB.rnn = t; LAB.rnnClient = c.id; LAB.rnnGuard = rnnGuard(c, t);
+      const reports = {}, fc = {};
+      t.platforms.forEach(function (pk) { const r = platformReport(c, pk); reports[pk] = r; fc[pk] = r.rows ? r.rows.map(function (x) { return x.expected; }) : []; });
+      const weeks = Math.max.apply(null, t.platforms.map(function (pk) { return c.series[pk].er.length; }));
+      setText('rnn-status', 'Saving to your database…');
+      const wBlob = { model: await Store.serializeModel(tf, t.model), scalers: t.scalers, lookback: t.lookback, platforms: t.platforms,
+                      history: t.history, windows: t.windows, task: t.task, maeScaled: t.maeScaled, guard: LAB.rnnGuard };
+      const saved = await Store.saveRun(sb, ownerId(), {
+        client_id: c.id, kind: 'rnn', status: 'ok', model_name: 'weekly_forecast', backend: (tf.getBackend && tf.getBackend()) || null,
+        epochs: t.history.length, loss_final: t.history.length ? t.history[t.history.length - 1] : null, mae: t.maeScaled,
+        train_rows: t.windows, data_weeks: weeks, data_posts: (c.posts_log || []).length,
+        architecture: { type: 'LSTM', lookback: t.lookback, platforms: t.platforms, params: t.model.countParams() },
+        hyperparams: { epochs: 150, hidden: 'relu', output: 'linear' }, metrics: { maeScaled: t.maeScaled, windows: t.windows },
+        forecast: fc, summary: { guardrails: LAB.rnnGuard, headlines: Object.keys(reports).reduce(function (o, k) { o[k] = reports[k].headline; return o; }, {}), reports: reports },
+        activation_audit: A.auditModel(t.model, 'regression'), weights: wBlob });
+      if (saved.ok) { LAB.rnnSavedAt = new Date().toISOString(); LAB.rnnRun = { data_weeks: weeks, data_posts: (c.posts_log || []).length }; toast('Forecast updated and saved to your database', 'success'); }
+      else { LAB.rnnSaveError = saved.error; toast('Forecast updated, but NOT saved to the database: ' + saved.error, 'error', 8000); }
+      logEvent('rnn_trained', { client: c.id, windows: t.windows, lookback: t.lookback });
+    } catch (e) { LAB.rnn = null; LAB.rnnError = e.message; toast('Forecast failed: ' + e.message, 'error', 6000); }
     renderRNN();
   };
+
+  async function saveOther(kind, fields, model) {
+    const c = client(); if (!c) return;
+    const row = Object.assign({ client_id: c.id, kind: kind, status: 'ok', backend: (tf.getBackend && tf.getBackend()) || null,
+      data_weeks: Math.max.apply(null, [0].concat((c.platforms || []).map(function (pk) { return c.series[pk].er.length; }))), data_posts: (c.posts_log || []).length }, fields);
+    let r;
+    if (model) {
+      try { row.weights = await Store.serializeModel(tf, model); } catch (e) { row.weights = null; row.summary = Object.assign({}, row.summary, { weights_note: 'Settings saved; the trained weights were too large to store (' + e.message + ').' }); }
+    }
+    r = await Store.saveRun(sb, ownerId(), row);
+    if (!r.ok) toast('Trained, but NOT saved to the database: ' + r.error, 'error', 8000);
+    else toast('Result saved to your database', 'success');
+  }
 
   /* ---------- CNN ---------- */
   function renderCNN() {
@@ -156,6 +267,7 @@
       LAB.cnn = { model: model, task: task };
       logEvent('cnn_trained', { client: (client() || {}).id, images: labels.length, task: task });
       toast('CNN trained on ' + labels.length + ' images', 'success');
+      await saveOther('cnn', { model_name: 'post_image_classifier', epochs: 25, train_rows: labels.length, architecture: { task: task, classes: n, params: model.countParams() }, summary: { headline: 'Learned to sort post images into ' + n + ' groups from ' + labels.length + ' labelled images.' }, activation_audit: A.auditModel(model, task) }, model);
     } catch (e) { toast('CNN training failed: ' + e.message, 'error', 6000); }
     finally { xs.dispose(); ys.dispose(); }
     renderCNN();
@@ -210,6 +322,7 @@
       LAB.ganRows = G.generate(tf, LAB.gan, 10); LAB.ganReal = rows; LAB.ganPlat = pk;
       logEvent('gan_trained', { client: c.id, platform: pk, real_rows: rows.length });
       toast('Generated 10 synthetic weeks', 'success');
+      await saveOther('gan', { model_name: 'synthetic_weeks', platform: pk, epochs: 500, train_rows: rows.length, architecture: { params: LAB.gan.generator.countParams() + LAB.gan.discriminator.countParams() }, forecast: LAB.ganRows, summary: { headline: 'Generated 10 realistic what-if weeks for ' + platName(pk) + ' from ' + rows.length + ' real weeks. These are never mixed into your real results.' } }, null);
     } catch (e) { toast('GAN training failed: ' + e.message, 'error', 6000); }
     renderGAN();
   };

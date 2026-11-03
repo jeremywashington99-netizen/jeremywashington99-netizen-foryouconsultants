@@ -38,7 +38,7 @@
   }
   function netForecast(pk) {
     try {
-      if (typeof NET !== 'undefined' && NET && NET.trained && NET.forecast && NET.forecast[pk] && NET.forecast[pk].length) return NET.forecast[pk][0];
+      if (typeof NET !== 'undefined' && NET && NET.trained && NET.forecasts && NET.forecasts[pk] && NET.forecasts[pk].length) return NET.forecasts[pk][0];
     } catch (e) { /* model not built */ }
     return null;
   }
