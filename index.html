@@ -1820,7 +1820,7 @@ const NET = {
         const health=G.weightsHealth(this.reg.getWeights().map(w=>w.dataSync()));
         this.guard=G.audit({ history:this.lossHistory, trainErr:trainErr, holdErr:holdErr, holdN:holdN, r2:this.metrics.r2, rows:X.length,
           classCounts:XC.length>=3?this.classCounts:null, dataIssues:dataIssues, leak:leak, health:health,
-          drift:G.drift(client.series[primary]), adapted:this.recencyWeighted, scale:G.scaling(X), weeks:client.series[primary].er.length });
+          drift:G.drift(client.series[primary]), adapted:this.recencyWeighted, holdPoints:(holdErr!=null&&platNorms[primary]&&platNorms[primary].er)?holdErr*((platNorms[primary].er.hi-platNorms[primary].er.lo)||1):null, scale:G.scaling(X), weeks:client.series[primary].er.length });
       }
     }catch(e){ console.warn('guardrail audit failed',e); this.guard=null; }
     logEvent('model_trained', {
@@ -4863,21 +4863,21 @@ async function migrateLocalToCloud(){
   try{ localStorage.removeItem('fy_clients_v3'); }catch(e){}
 }
 </script>
-<div id="fy-build" style="position:fixed;left:8px;bottom:6px;z-index:5;font-size:10px;color:var(--text3);opacity:.7;pointer-events:none">Build 2026-11-02.9</div>
-<script src="js/dl-activations.js?v=2026-11-02.9"></script>
-<script src="js/dl-cnn.js?v=2026-11-02.9"></script>
-<script src="js/dl-rnn.js?v=2026-11-02.9"></script>
-<script src="js/dl-gan.js?v=2026-11-02.9"></script>
-<script src="js/client-backup.js?v=2026-11-02.9"></script>
-<script src="js/mkt-benchmarks.js?v=2026-11-02.9"></script>
-<script src="js/mkt-metrics.js?v=2026-11-02.9"></script>
-<script src="js/mkt-lifecycle.js?v=2026-11-02.9"></script>
-<script src="js/dl-guardrails.js?v=2026-11-02.9"></script>
-<script src="js/dl-backtest.js?v=2026-11-02.9"></script>
-<script src="js/model-store.js?v=2026-11-02.9"></script>
-<script src="js/model-explain.js?v=2026-11-02.9"></script>
-<script src="js/model-sync.js?v=2026-11-02.9"></script>
-<script src="js/dl-lab.js?v=2026-11-02.9"></script>
-<script src="js/mkt-ui.js?v=2026-11-02.9"></script>
+<div id="fy-build" style="position:fixed;left:8px;bottom:6px;z-index:5;font-size:10px;color:var(--text3);opacity:.7;pointer-events:none">Build 2026-11-02.10</div>
+<script src="js/dl-activations.js?v=2026-11-02.10"></script>
+<script src="js/dl-cnn.js?v=2026-11-02.10"></script>
+<script src="js/dl-rnn.js?v=2026-11-02.10"></script>
+<script src="js/dl-gan.js?v=2026-11-02.10"></script>
+<script src="js/client-backup.js?v=2026-11-02.10"></script>
+<script src="js/mkt-benchmarks.js?v=2026-11-02.10"></script>
+<script src="js/mkt-metrics.js?v=2026-11-02.10"></script>
+<script src="js/mkt-lifecycle.js?v=2026-11-02.10"></script>
+<script src="js/dl-guardrails.js?v=2026-11-02.10"></script>
+<script src="js/dl-backtest.js?v=2026-11-02.10"></script>
+<script src="js/model-store.js?v=2026-11-02.10"></script>
+<script src="js/model-explain.js?v=2026-11-02.10"></script>
+<script src="js/model-sync.js?v=2026-11-02.10"></script>
+<script src="js/dl-lab.js?v=2026-11-02.10"></script>
+<script src="js/mkt-ui.js?v=2026-11-02.10"></script>
 </body>
 </html>

@@ -172,7 +172,7 @@
         'It is ' + r2(ratio) + 'x less accurate on weeks it never studied than on weeks it did. It is memorising.', 'Add more weeks; until then trust the range, not the single number.'));
     } else if (ratio > 1.6) {
       c.push(chk('overfit', 1, 'Memorising instead of learning', 'watch',
-        'A little less accurate on weeks it never studied (' + r2(ratio) + 'x). Mild memorising.', 'More weeks will close the gap.'));
+        'A little less accurate on weeks it never studied (' + r2(ratio) + 'x). Mild memorising.', 'The engine already uses a smaller network, weight penalties and dropout; use the likely range alongside the single number.'));
     } else {
       c.push(chk('overfit', 1, 'Memorising instead of learning', 'ok',
         'Held-back weeks scored about as well as studied weeks (' + r2(ratio) + 'x). It is learning patterns, not memorising.', ''));
@@ -246,6 +246,9 @@
 
     // 9 drift
     if (!i.drift || i.drift.state === 'unknown') c.push(chk('drift', 9, 'Your audience changing', 'unknown', 'Needs 8+ weeks to compare recent weeks with earlier ones.', ''));
+    else if ((i.drift.state === 'shifted' || i.drift.state === 'moving') && i.adapted && hasHold &&
+             (ratio <= 1.6 || (i.holdPoints != null && i.holdPoints <= 0.5 * Math.abs(i.drift.now - i.drift.before)))) c.push(chk('drift', 9, 'Your audience changing', 'ok',
+      'Engagement has stepped up (' + i.drift.before + '% earlier, ' + i.drift.now + '% recently), and the engine keeps up with it: your newest weeks, held back from learning, were predicted ' + (i.holdPoints != null && i.holdPoints <= 0.5 * Math.abs(i.drift.now - i.drift.before) ? 'to within about ' + r2(i.holdPoints) + ' points, far less than the ' + r2(Math.abs(i.drift.now - i.drift.before)) + '-point step up' : 'nearly as well as older ones (' + r2(ratio) + 'x the usual miss)') + '. It also gives those weeks extra weight.', ''));
     else if (i.drift.state === 'shifted' && i.adapted) c.push(chk('drift', 9, 'Your audience changing', 'watch', 'Recent engagement (' + i.drift.now + '%) is well above the earlier pattern (' + i.drift.before + '%). The engine has counted your newest weeks twice while learning so it follows the new level.', 'It re-adapts every time you add a week. Check the forecast against the next real week.'));
     else if (i.drift.state === 'shifted') c.push(chk('drift', 9, 'Your audience changing', 'problem', 'Recent engagement (' + i.drift.now + '%) is well outside the earlier pattern (' + i.drift.before + '%). The engine learned an older audience.', 'Treat this forecast with care and retrain as new weeks arrive.'));
     else if (i.drift.state === 'moving') c.push(chk('drift', 9, 'Your audience changing', 'watch', 'Recent engagement (' + i.drift.now + '%) has moved from earlier weeks (' + i.drift.before + '%).', 'Retrain regularly; the engine refreshes whenever you add weeks.'));
