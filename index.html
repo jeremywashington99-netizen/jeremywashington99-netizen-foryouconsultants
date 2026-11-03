@@ -1915,12 +1915,20 @@ async function renderDashboard(){
       (hasSnapshot(c)
         ? 'The public profile figures above are real and dated. Reach, engagement rate, saves, click-throughs and demographics are not on a public page \u2014 they live in the owner analytics only.'
         : 'A public profile link cannot supply reach, engagement rate or click data.')+
+      '<br/><br/><strong style="color:var(--text)">You do not have to wait for a week of data.</strong> '+
+      'Log a single post with its reach and interaction counts and the instant scorecard below grades it '+
+      'against the published platform average straight away.'+
       '<br/><br/>'+
       '<button class="btn btn-primary" style="font-size:12px;margin-right:8px" onclick="openAddWeek()">+ Enter a week</button>'+
       '<button class="btn btn-ghost" style="font-size:12px;margin-right:8px" onclick="openImport()">\u2191 Import export</button>'+
       '<button class="btn btn-ghost" style="font-size:12px" onclick="openAddSnapshot()">\u21BB Update public snapshot</button>'+
       '</div>';
     blankDashboard();
+    /* Posts stand on their own: one logged post already yields engagement rate,
+       save rate, reach rate and a graded scorecard, so the table and the
+       posting-time grid are rendered here too rather than waiting for a week. */
+    renderPostHeatmap(c);
+    renderPostsTable(c);
     const pm=publicMetrics(c);
     if (pm){
       setText('k-fol', fmt(pm.followers));
@@ -2096,6 +2104,12 @@ async function renderDashboard(){
   renderPostHeatmap(c);
 
   /* ---------- Logged posts table ---------- */
+  renderPostsTable(c);
+}
+
+/* The logged-post table. Its own function because posts are worth showing
+   even when no weekly figures exist yet. */
+function renderPostsTable(c){
   const logs=(c.posts_log||[]).slice().sort((a,b)=>b.reach-a.reach);
   setHTML('posts-body', logs.length? logs.map(p=>
     '<tr><td>'+esc(p.title)+(p.views_only?' <span class="badge badge-blue" style="margin-left:6px">public</span>':'')+
@@ -2401,7 +2415,8 @@ async function renderAI(){
   renderAIPlain(c);
   setText('net-status', NET.trained
     ? ('Trained \u00B7 '+NET.metrics.params+' parameters \u00B7 '+NET.metrics.epochs+' epochs \u00B7 '+NET.metrics.rows+' training pairs \u00B7 '+NET.metrics.backend)
-    : (c && hasEnoughToTrain(c) ? 'Ready to train' : 'Needs at least 4 weeks of data'));
+    : (c && hasEnoughToTrain(c) ? 'Ready to train'
+        : 'Needs 4 weeks to train \u2014 the forecast and scorecard above work from your first entry'));
 
   setHTML('net-layers', layers.length? layers.map(l=>
     '<div class="net-layer" title="'+esc(plainLayer(l))+'"><span style="color:var(--text2);font-family:monospace;font-size:11px">'+l.head+'</span>'+
@@ -2445,7 +2460,9 @@ async function renderAI(){
   } else {
     cards.push({icon:'\u2139', title:'Not enough history yet',
       badge:s.er.length+' of 3 entries needed',
-      body:'Trend statistics need at least three weeks. Add more weeks from your analytics screen and this fills in automatically.',
+      body:'A regression line needs at least three weeks. Until then the forecast card above still gives a figure \u2014 '+
+        'anchored to the published platform average at one entry, then a damped trend \u2014 and the instant scorecard on '+
+        'the dashboard grades what you have already entered.',
       actions:[['Add a week','openAddWeek()']]});
   }
 
@@ -2522,7 +2539,10 @@ function renderClients(){
       '<div style="font-size:15px;font-weight:600;margin-bottom:4px;color:var(--text)">No clients</div>'+
       '<div style="font-size:13px">Add one by profile link or create it manually.</div></div>'+
       '<div class="add-client-card" onclick="openConnectLink()"><div style="font-size:28px;margin-bottom:10px">\uD83D\uDD17</div>'+
-      '<div style="font-size:13px;font-weight:500">Add by Link</div></div>';
+      '<div style="font-size:13px;font-weight:500">Add by Link</div></div>'+
+      '<div class="add-client-card" onclick="fyLoadDemo()"><div style="font-size:28px;margin-bottom:10px">\u2726</div>'+
+      '<div style="font-size:13px;font-weight:500">Load demo client</div>'+
+      '<div style="font-size:11px;color:var(--text3);margin-top:4px;text-align:center">Sample data to try<br/>the analytics on</div></div>';
     setText('nav-clients','0'); return;
   }
   grid.innerHTML=DB.clients.map(c=>{
@@ -2896,6 +2916,33 @@ function openAddPost(editId){
       '<div class="mrow" style="margin:0"><label>Saves</label><input type="number" id="p-saves"/></div>'+
       '<div class="mrow" style="margin:0"><label>ER % (optional)</label><input type="number" step="0.01" id="p-er"/></div>'+
     '</div>'+
+    '<details style="margin-top:14px"><summary style="cursor:pointer;font-size:12px;color:var(--gold)">'+
+      'Optional \u2014 funnel, video and paid figures (each one unlocks more metrics)</summary>'+
+      '<div style="font-size:11px;color:var(--text3);margin:8px 0 10px">Leave any of these blank. Blank means '+
+      '<em>not tracked</em> and is never counted as zero.</div>'+
+      '<div class="mrow2">'+
+        '<div class="mrow" style="margin:0"><label>Profile visits</label><input type="number" id="p-visits"/></div>'+
+        '<div class="mrow" style="margin:0"><label>Link clicks</label><input type="number" id="p-clicks"/></div>'+
+      '</div>'+
+      '<div class="mrow2" style="margin-top:12px">'+
+        '<div class="mrow" style="margin:0"><label>New follows from this post</label><input type="number" id="p-follows"/></div>'+
+        '<div class="mrow" style="margin:0"><label>Views held 3s+ (for hook rate)</label><input type="number" id="p-v3"/></div>'+
+      '</div>'+
+      '<div class="mrow2" style="margin-top:12px">'+
+        '<div class="mrow" style="margin:0"><label>Completion rate %</label><input type="number" step="0.1" id="p-compl"/></div>'+
+        '<div class="mrow" style="margin:0"><label>Average watch seconds</label><input type="number" step="0.1" id="p-watch"/></div>'+
+      '</div>'+
+      '<div class="mrow2" style="margin-top:12px">'+
+        '<div class="mrow" style="margin:0"><label>Paid spend</label><input type="number" step="0.01" id="p-spend"/></div>'+
+        '<div class="mrow" style="margin:0"><label>Revenue attributed</label><input type="number" step="0.01" id="p-rev"/></div>'+
+      '</div>'+
+      '<div class="mrow2" style="margin-top:12px">'+
+        '<div class="mrow" style="margin:0"><label>Conversions</label><input type="number" id="p-conv"/></div>'+
+        '<div class="mrow" style="margin:0"><label>Figures read at</label><input type="datetime-local" id="p-measured"/>'+
+        '<div style="font-size:11px;color:var(--text3);margin-top:4px">When you copied these numbers off the platform. '+
+        'Leave blank for now.</div></div>'+
+      '</div>'+
+    '</details>'+
     '<div id="p-status" style="font-size:12px;min-height:18px;color:var(--text2)"></div>',
     '<button class="btn btn-ghost" onclick="closeModal()">Cancel</button>'+
     '<button class="btn btn-primary" onclick="savePost()">'+(ed?'Save changes':'Save post')+'</button>');
@@ -2932,13 +2979,27 @@ async function savePost(){
     hourBucket=Math.min(5, Math.max(0, Math.round((hour-6)/3)));
   }
 
+  /* Optional fields. A blank box stays undefined so "not tracked" is never
+     stored as a zero, which would understate every rate built on it. */
+  const opt=(id)=>{ const e=document.getElementById(id); if(!e) return undefined;
+    const v=String(e.value==null?'':e.value).trim(); if(v==='') return undefined;
+    const x=Number(v); return isFinite(x)? x : undefined; };
+  const measuredEl=document.getElementById('p-measured');
+  const measured=measuredEl && measuredEl.value ? measuredEl.value : undefined;
+
   c.posts_log=c.posts_log||[];
   const rec={ id:'p'+Date.now(), platform:pk, title, cls, reach, likes, comments, shares, saves, er,
               posted_at:when||null, dow, hour, hourBucket };
+  const extras={ profile_visits:opt('p-visits'), link_clicks:opt('p-clicks'), new_follows:opt('p-follows'),
+                 views_3s:opt('p-v3'), completion_rate:opt('p-compl'), avg_watch_seconds:opt('p-watch'),
+                 spend:opt('p-spend'), revenue:opt('p-rev'), conversions:opt('p-conv'), measured_at:measured };
+  Object.keys(extras).forEach(k=>{ if(extras[k]!==undefined) rec[k]=extras[k]; });
   let oldTitle=null;
   if (EDIT_POST){
     const ix=c.posts_log.findIndex(x=>x.id===EDIT_POST);
-    if (ix>-1){ oldTitle=c.posts_log[ix].title; rec.id=EDIT_POST; c.posts_log[ix]=rec; } else c.posts_log.push(rec);
+    if (ix>-1){ oldTitle=c.posts_log[ix].title; rec.id=EDIT_POST;
+      if (c.posts_log[ix].readings) rec.readings=c.posts_log[ix].readings;   /* re-readings survive an edit */
+      c.posts_log[ix]=rec; } else c.posts_log.push(rec);
   } else c.posts_log.push(rec);
   EDIT_POST=null;
   await DB.save(c);
@@ -2950,7 +3011,12 @@ async function savePost(){
         client_id:c.id, owner_id:SESSION.user.id, platform:pk, title,
         posted_at: when? new Date(when).toISOString():null,
         post_hour:hour, post_dow:dow, content_class:cls,
-        reach, engagement_rate:er, likes, saves, shares, comments
+        reach, engagement_rate:er, likes, saves, shares, comments,
+        profile_visits:rec.profile_visits??null, link_clicks:rec.link_clicks??null,
+        new_follows:rec.new_follows??null, views_3s:rec.views_3s??null,
+        completion_rate:rec.completion_rate??null, avg_watch_seconds:rec.avg_watch_seconds??null,
+        spend:rec.spend??null, revenue:rec.revenue??null, conversions:rec.conversions??null,
+        measured_at: rec.measured_at? new Date(rec.measured_at).toISOString():null
       });
     }catch(e){ console.warn('post insert failed',e); }
   }
@@ -4584,6 +4650,11 @@ function prefillPost(id){
   set('p-plat',p.platform); set('p-when',p.posted_at||''); set('p-title',p.title); set('p-cls',p.cls);
   set('p-reach',p.reach); set('p-likes',p.likes||''); set('p-comments',p.comments||'');
   set('p-shares',p.shares||''); set('p-saves',p.saves||''); set('p-er',p.er||'');
+  /* null and 0 are different facts here, so only a real number is written back. */
+  const opt=(k,v)=>{ const e=document.getElementById(k); if(e) e.value=(v==null?'':v); };
+  opt('p-visits',p.profile_visits); opt('p-clicks',p.link_clicks); opt('p-follows',p.new_follows);
+  opt('p-v3',p.views_3s); opt('p-compl',p.completion_rate); opt('p-watch',p.avg_watch_seconds);
+  opt('p-spend',p.spend); opt('p-rev',p.revenue); opt('p-conv',p.conversions); opt('p-measured',p.measured_at);
 }
 
 
@@ -4646,6 +4717,10 @@ async function migrateLocalToCloud(){
 <script src="js/dl-rnn.js"></script>
 <script src="js/dl-gan.js"></script>
 <script src="js/client-backup.js"></script>
+<script src="js/mkt-benchmarks.js"></script>
+<script src="js/mkt-metrics.js"></script>
+<script src="js/mkt-lifecycle.js"></script>
 <script src="js/dl-lab.js"></script>
+<script src="js/mkt-ui.js"></script>
 </body>
 </html>
