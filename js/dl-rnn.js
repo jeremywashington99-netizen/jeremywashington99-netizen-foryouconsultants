@@ -76,10 +76,14 @@
     act.checkHidden(o.hidden);
     const out = act.outputSpec(o.task, 1);
     const m = tf.sequential({ name: 'rnn_' + o.task });
-    const cellCfg = { units: o.units, activation: o.cellActivation, recurrentActivation: 'sigmoid',
+    const leaky = o.hidden === 'leaky';
+    /* Leaky mode: the cell itself is linear and a LeakyReLU layer follows it, so every hidden
+       layer is Leaky ReLU (tfjs has no built-in leaky cell activation). Default mode: ReLU cell. */
+    const cellCfg = { units: o.units, activation: leaky ? 'linear' : o.cellActivation, recurrentActivation: 'sigmoid',
                       inputShape: [o.timesteps, o.features], kernelInitializer: act.HIDDEN_INIT,
                       returnSequences: false, name: o.cell + '_' + o.units };
     m.add(o.cell === 'gru' ? tf.layers.gru(cellCfg) : tf.layers.lstm(cellCfg));
+    if (leaky) m.add(tf.layers.leakyReLU({ alpha: 0.2, name: 'cell_leaky' }));
     act.addHidden(tf, m, function (a) {
       return tf.layers.dense({ units: o.denseUnits, activation: a, kernelInitializer: act.HIDDEN_INIT, name: 'dense_' + o.denseUnits });
     }, o.hidden);

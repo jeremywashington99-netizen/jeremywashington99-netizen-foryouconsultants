@@ -1432,11 +1432,11 @@ const DB = {
     }
   },
 
-  async remove(id){
+  async remove(id,skipCloud){
     this.clients=this.clients.filter(c=>c.id!==id);
     this.persist();
     if (this.activeId===id) this.activeId=this.clients[0]?this.clients[0].id:null;
-    if (sb && SESSION && !LOCAL_MODE){ try{ await sb.from('clients').delete().eq('id',id); }catch(e){} }
+    if (!skipCloud && sb && SESSION && !LOCAL_MODE){ try{ await sb.from('clients').delete().eq('id',id); }catch(e){} }
   },
 
   active(){ return this.clients.find(c=>c.id===this.activeId) || this.clients[0] || null; },
@@ -2545,12 +2545,72 @@ function renderClients(){
         '<div class="client-metric"><div class="client-metric-label">Latest ER</div>'+
         '<div class="client-metric-value" style="color:'+(er!=null?'var(--green)':'var(--text3)')+'">'+
         (er!=null? er+'%':'\u2014')+'</div></div>'+
-      '</div></div>';
+      '</div>'+
+      '<button class="btn btn-ghost fy-del" style="font-size:11px;padding:4px 10px;margin-top:10px;margin-right:6px;color:var(--red)" title="Delete this client" onclick="openDeleteClient(\''+c.id+'\',event)">\uD83D\uDDD1 Delete</button>'+
+      '</div>';
   }).join('')+
   '<div class="add-client-card" onclick="openConnectLink()"><div style="font-size:28px;margin-bottom:10px">+</div>'+
   '<div style="font-size:13px;font-weight:500">Add Client</div>'+
   '<div style="font-size:11px;color:var(--text3);margin-top:4px;text-align:center">Paste a profile link<br/>or enter details manually</div></div>';
   setText('nav-clients', DB.clients.length);
+}
+
+/* ---------- Delete a client (typed confirmation) ---------- */
+const DELETE_PHRASE='I am sure I want to delete';
+let DELETE_ID=null;
+function openDeleteClient(id,ev){
+  if (ev) ev.stopPropagation();
+  const c=DB.clients.find(x=>x.id===id); if(!c) return;
+  DELETE_ID=id;
+  const wc=weekCount(c), np=(c.posts_log||[]).length;
+  showModal('Delete '+c.name+'?',
+    '<div class="callout callout-warn" style="margin-bottom:14px"><strong>This permanently deletes '+esc(c.name)+'</strong> and everything saved for it: '+
+    wc+' logged week'+(wc===1?'':'s')+', '+np+' post'+(np===1?'':'s')+', snapshots and settings. It is removed from the database too.</div>'+
+    '<div style="font-size:12px;color:var(--text2);margin-bottom:12px">Want a copy first? <a href="#" onclick="fyBackupClient(DELETE_ID,event);return false" style="color:var(--gold)">Download a restorable backup</a> \u2014 you can re-upload it later in Settings \u2192 Restore.</div>'+
+    '<div class="mrow"><label>To confirm, type exactly: <strong>'+DELETE_PHRASE+'</strong></label>'+
+    '<input type="text" id="del-confirm" autocomplete="off" oninput="checkDeletePhrase()" placeholder="'+DELETE_PHRASE+'"/></div>'+
+    '<div id="del-status" style="font-size:12px;min-height:18px;color:var(--text2)"></div>',
+    '<button class="btn btn-ghost" onclick="closeModal()">Cancel</button>'+
+    '<button class="btn" id="del-go" disabled style="background:var(--red);border-color:var(--red);color:#fff;opacity:.45" onclick="confirmDeleteClient()">Delete client</button>');
+}
+function deletePhraseOK(){
+  const v=((document.getElementById('del-confirm')||{}).value||'').trim().toLowerCase();
+  return v===DELETE_PHRASE.toLowerCase();
+}
+function checkDeletePhrase(){
+  const b=document.getElementById('del-go'); if(!b) return;
+  const ok=deletePhraseOK(); b.disabled=!ok; b.style.opacity=ok?'1':'.45';
+}
+async function confirmDeleteClient(){
+  const id=DELETE_ID, c=DB.clients.find(x=>x.id===id);
+  if (!c) { closeModal(); return; }
+  if (!deletePhraseOK()){
+    const st=document.getElementById('del-status');
+    if (st){ st.textContent='Type the sentence exactly to delete.'; st.style.color='var(--red)'; }
+    return;
+  }
+  const name=c.name;
+  let err=null;
+  if (sb && SESSION && !LOCAL_MODE){
+    try{ const r=await sb.from('clients').delete().eq('id',id); if (r && r.error) err=r.error; }catch(e){ err=e; }
+  }
+  if (err){
+    const st=document.getElementById('del-status');
+    if (st){ st.textContent='Not deleted: '+(err.message||err); st.style.color='var(--red)'; }
+    toast('NOT deleted from the database: '+(err.message||err),'error',6000);
+    return;
+  }
+  await DB.remove(id,true);
+  DELETE_ID=null;
+  logEvent('client_deleted',{client:id});
+  closeModal(); NET.reset();
+  const a=DB.active();
+  if (a){ setText('tb-client',a.name); setText('tb-avatar',a.avatar); }
+  else { setText('tb-client','No client'); setText('tb-avatar','--'); }
+  renderClients();
+  try{ if (a) await renderDashboard(); }catch(e){}
+  goView('clients');
+  toast(name+' deleted','success');
 }
 
 async function switchClient(id){
