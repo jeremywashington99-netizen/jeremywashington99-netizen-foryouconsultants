@@ -1364,49 +1364,6 @@ function showSessionInfo(){
     '<button class="btn btn-primary" onclick="closeModal();signOut()">'+(LOCAL_MODE?'Leave local mode':'Sign out')+'</button>');
 }
 
-function openForgot(){
-  showModal('Reset password',
-    '<p style="font-size:13px;color:var(--text2);margin-bottom:16px">We will email a recovery link. Opening it returns you here with a token so you can set a new password.</p>'+
-    '<div class="mrow"><label>Email address</label><input type="email" id="reset-email" placeholder="you@company.com"/></div>'+
-    '<div id="reset-status" style="font-size:12px;min-height:18px"></div>',
-    '<button class="btn btn-ghost" onclick="closeModal()">Cancel</button>'+
-    '<button class="btn btn-primary" onclick="sendReset()">Send link</button>');
-}
-async function sendReset(){
-  const email=(document.getElementById('reset-email')||{}).value;
-  const st=document.getElementById('reset-status');
-  if(!email){ st.textContent='Enter an email address.'; st.style.color='var(--red)'; return; }
-  if(!sb){ st.textContent='Supabase is not reachable.'; st.style.color='var(--red)'; return; }
-  st.textContent='Sending...'; st.style.color='var(--text2)';
-  try{
-    const r=await sb.auth.resetPasswordForEmail(email,{ redirectTo: location.origin+location.pathname+'?recovery=1' });
-    if (r.error) throw r.error;
-    st.textContent='Sent. Check your inbox.'; st.style.color='var(--green)';
-    setTimeout(closeModal,1800);
-  }catch(ex){ st.textContent=ex.message; st.style.color='var(--red)'; }
-}
-function openSetPassword(){
-  showModal('Set a new password',
-    '<div class="mrow"><label>New password</label><input type="password" id="np1" placeholder="At least 8 characters"/></div>'+
-    '<div class="mrow"><label>Confirm</label><input type="password" id="np2"/></div>'+
-    '<div id="np-status" style="font-size:12px;min-height:18px"></div>',
-    '<button class="btn btn-primary" onclick="applyNewPassword()">Update password</button>');
-}
-async function applyNewPassword(){
-  const a=(document.getElementById('np1')||{}).value, b=(document.getElementById('np2')||{}).value;
-  const st=document.getElementById('np-status');
-  if(!a||a.length<8){ st.textContent='At least 8 characters.'; st.style.color='var(--red)'; return; }
-  if(a!==b){ st.textContent='Passwords do not match.'; st.style.color='var(--red)'; return; }
-  try{
-    const r=await sb.auth.updateUser({password:a});
-    if (r.error) throw r.error;
-    lockClear(); closeModal();
-    toast('Password updated','success');
-    history.replaceState({},'',location.pathname);
-    launchApp();
-  }catch(ex){ st.textContent=ex.message; st.style.color='var(--red)'; }
-}
-
 /* ============================================================
    EVENT LOG
 ============================================================ */
@@ -4147,34 +4104,6 @@ function exportAdminPDF(){
       toast('Admin PDF downloaded','success');
     }catch(e){ console.error(e); toast('PDF failed: '+e.message,'error'); }
   },350);
-}
-
-/* ---------- Account recovery ----------
-   The supported way to get a user back into their account. Their password
-   cannot be read, so it gets replaced by one only they choose. */
-async function sendUserReset(email){
-  if (!sb){ toast('Supabase not connected','error'); return; }
-  showModal('Send a reset link',
-    '<p style="font-size:13px;color:var(--text2);margin-bottom:14px">'+
-    'This emails <strong>'+esc(email)+'</strong> a one-time recovery link. They set a new password themselves.</p>'+
-    '<div class="callout callout-info">Existing passwords cannot be retrieved by anyone, including you. '+
-    'Supabase stores a bcrypt hash and discards the plaintext at signup. A reset link is the supported path '+
-    'and it leaves an audit trail in the activity log.</div>'+
-    '<div id="ru-status" style="font-size:12px;min-height:18px;margin-top:10px;color:var(--text2)"></div>',
-    '<button class="btn btn-ghost" onclick="closeModal()">Cancel</button>'+
-    '<button class="btn btn-primary" onclick="doUserReset(\''+esc(email)+'\')">Send link</button>');
-}
-async function doUserReset(email){
-  const st=document.getElementById('ru-status');
-  if (st){ st.textContent='Sending...'; st.style.color='var(--text2)'; }
-  try{
-    const r=await sb.auth.resetPasswordForEmail(email,{ redirectTo: location.origin+location.pathname+'?recovery=1' });
-    if (r.error) throw r.error;
-    logEvent('admin_sent_reset',{target:email});
-    if (st){ st.textContent='Sent to '+email; st.style.color='var(--green)'; }
-    setTimeout(closeModal,1600);
-    toast('Reset link sent','success');
-  }catch(e){ if (st){ st.textContent=e.message; st.style.color='var(--red)'; } }
 }
 
 /* ---------- Document storage ---------- */
