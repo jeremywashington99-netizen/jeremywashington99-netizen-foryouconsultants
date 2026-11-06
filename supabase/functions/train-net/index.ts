@@ -7,8 +7,8 @@
 import "https://raw.githubusercontent.com/jeremywashington99-netizen/jeremywashington99-netizen-foryouconsultants/606e915e30397480e9d50bce1c2e575ec1324bd1/js/dl-guardrails.js";
 import "https://raw.githubusercontent.com/jeremywashington99-netizen/jeremywashington99-netizen-foryouconsultants/606e915e30397480e9d50bce1c2e575ec1324bd1/js/mini-mlp.js";
 import "https://raw.githubusercontent.com/jeremywashington99-netizen/jeremywashington99-netizen-foryouconsultants/606e915e30397480e9d50bce1c2e575ec1324bd1/js/net-core.js";
-import "./net-core-v4.js";
-import "./net-core-v5.js";
+import "https://raw.githubusercontent.com/jeremywashington99-netizen/jeremywashington99-netizen-foryouconsultants/d724a6b423deb48e60645519d8979421e81b7d7c/supabase/functions/train-net/net-core-v4.js";
+import "https://raw.githubusercontent.com/jeremywashington99-netizen/jeremywashington99-netizen-foryouconsultants/41f369466fb3554d3ef9f0995fafa1fed9e28ffa/supabase/functions/train-net/net-core-v5.js";
 
 // deno-lint-ignore no-explicit-any
 const g: any = globalThis;
@@ -16,8 +16,8 @@ const g: any = globalThis;
 // change-from-this-week output, 5-network ensemble). A page says which one it uses with body.feature_version;
 // anything else gets v3, so no open page breaks.
 const CORE_V3 = g.FYNetCore;
-const CORE_V4 = g.FYNetCoreV4;   // set by ./net-core-v4.js (the site's previous js/net-core.js, under its own name)
-const CORE_V5 = g.FYNetCoreV5;   // set by ./net-core-v5.js (same file as the site's js/net-core.js, under its own name)
+const CORE_V4 = g.FYNetCoreV4;   // set by net-core-v4.js (the site's previous js/net-core.js, under its own name)
+const CORE_V5 = g.FYNetCoreV5;   // set by net-core-v5.js (same file as the site's js/net-core.js, under its own name)
 const coreFor = (fv: unknown) =>
   (fv === 5 && CORE_V5 && CORE_V5.FEATURE_VERSION === 5) ? CORE_V5 :
   (fv === 4 && CORE_V4 && CORE_V4.FEATURE_VERSION === 4) ? CORE_V4 : CORE_V3;
