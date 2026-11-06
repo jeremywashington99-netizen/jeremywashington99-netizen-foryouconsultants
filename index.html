@@ -9,6 +9,8 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.17.0/dist/tf.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.0/dist/umd/supabase.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<script src="js/fy-platform.js?v=2026-11-06.1"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
@@ -314,6 +316,30 @@ code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;colo
 .plain-gloss{margin-top:12px;font-size:12px;color:var(--text2);line-height:1.6}
 .plain-gloss summary{cursor:pointer;color:var(--gold)}
 .plain-gloss div{margin-top:8px}
+
+/* ---- architecture diagrams ---- */
+.arch-flow{display:flex;flex-direction:column;align-items:stretch;gap:6px}
+.af-box{position:relative;border:1px solid var(--border);border-radius:10px;padding:12px 14px;background:var(--surface2);text-align:center;min-width:0}
+.af-blue{background:rgba(66,133,244,.10);border-color:rgba(66,133,244,.30)}
+.af-green{background:rgba(34,199,138,.10);border-color:rgba(34,199,138,.30)}
+.af-purple{background:rgba(155,127,232,.12);border-color:rgba(155,127,232,.32)}
+.af-t{font-weight:600;font-size:13px;color:var(--text)}
+.af-s{font-size:12px;color:var(--text2);margin-top:4px;line-height:1.5}
+.af-arrow{text-align:center;color:var(--text3);font-size:13px;line-height:1}
+.af-sub{font-weight:600;font-size:12.5px;color:var(--text);margin-top:4px}
+.af-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
+.af-grid .af-box{text-align:left}
+.af-pill{display:inline-block;font-size:10.5px;padding:2px 8px;border-radius:999px;background:rgba(34,199,138,.14);color:var(--green);margin-top:6px;margin-right:4px}
+.af-live{background:rgba(34,199,138,.16);color:var(--green)}
+.af-plan{background:rgba(201,168,76,.15);color:var(--gold)}
+.af-add{background:rgba(34,199,138,.18);color:var(--green);margin-top:0;vertical-align:middle}
+.af-note{font-size:12px;color:var(--text2);margin-top:12px;line-height:1.55}
+.suite-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+.suite{border:1px solid var(--border);border-radius:10px;padding:14px;background:var(--surface2);min-width:0}
+.suite-n{font-weight:600;font-size:13px;color:var(--text)}
+.suite-big{font-family:'Space Grotesk',sans-serif;font-size:26px;font-weight:600;color:var(--text);margin:4px 0}
+.suite-s{font-size:12px;color:var(--text2);line-height:1.5}
+@media (max-width:640px){ .af-grid,.suite-grid{grid-template-columns:1fr} }
 </style>
 </head>
 <body>
@@ -372,7 +398,7 @@ code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;colo
       </label>
       <div class="login-footer">
         <a onclick="showAuth('signup')">Create an account with a password</a> &middot;
-        <a onclick="openForgot()">Forgot password?</a>
+
       </div>
       <div style="display:flex;align-items:center;gap:10px;margin:16px 0 12px">
         <div style="flex:1;height:1px;background:var(--border2)"></div>
@@ -658,6 +684,84 @@ code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;colo
 
       <div class="view" id="view-architecture">
         <div class="page-header"><div><div class="page-title">Data &amp; Architecture</div><div class="page-sub">Where numbers come from and how to automate them</div></div></div>
+        <!-- ====== AI roadmap: custom model suite (from the Four You architecture brief) ====== -->
+        <div class="card" style="margin-bottom:16px" id="arch-ai-suite">
+          <div class="card-header"><div><div class="card-title">Four You Consultants AI architecture</div>
+            <div class="card-sub">No foundation models &middot; hybrid architecture &middot; every weight trained from random initialization on your own data</div></div>
+            <span class="badge badge-gold">Roadmap</span></div>
+          <div class="arch-flow">
+            <div class="af-box af-blue"><div class="af-t">Social media data sources</div><div class="af-s">TikTok &middot; Instagram &middot; Facebook &middot; X &middot; LinkedIn</div></div>
+            <div class="af-arrow">&darr;</div>
+            <div class="af-box"><div class="af-t">Data ingestion</div><div class="af-s">JavaScript &middot; per-platform batches &middot; JSON &middot; validation &middot; normalization</div><span class="af-pill af-live">Live</span></div>
+            <div class="af-arrow">&darr;</div>
+            <div class="af-box af-green"><div class="af-t">Supabase &mdash; central data layer</div><div class="af-s">PostgreSQL &middot; JSONB &middot; frozen feature store &middot; pgvector</div><span class="af-pill af-live">Live</span></div>
+            <div class="af-arrow">&darr;</div>
+            <div class="af-sub">Independently trained AI branches</div>
+            <div class="af-grid">
+              <div class="af-box"><div class="af-t">A. Custom language AI</div><span class="af-pill">From scratch</span><div class="af-s">Tokenizer &rarr; Embeddings &rarr; Transformer &rarr; Instruction training</div><span class="af-pill af-plan">Planned</span></div>
+              <div class="af-box"><div class="af-t">B. Predictive AI</div><span class="af-pill">From scratch</span><div class="af-s">LSTM &rarr; TCN &rarr; TFT &rarr; Forecast evaluation. Today: engagement network trained in the database.</div><span class="af-pill af-live">Partly live</span></div>
+              <div class="af-box"><div class="af-t">C. Content intelligence</div><span class="af-pill">From scratch</span><div class="af-s">Sentiment &rarr; Topic classification &rarr; Content categorization. Today: content-type classifier.</div><span class="af-pill af-live">Partly live</span></div>
+              <div class="af-box"><div class="af-t">D. Semantic retrieval</div><span class="af-pill">From scratch</span><div class="af-s">Custom embeddings &rarr; Supabase pgvector &rarr; Retrieval</div><span class="af-pill af-plan">Store live &middot; encoder planned</span></div>
+            </div>
+            <div class="af-arrow">&darr;</div>
+            <div class="af-box af-purple"><div class="af-t">LangGraph.js orchestration</div><div class="af-s">Connect custom models, SQL, retrieval and analytical tools</div><span class="af-pill af-plan">Planned</span></div>
+            <div class="af-arrow">&darr;</div>
+            <div class="af-box af-blue"><div class="af-t">Four You Consultants analytics dashboard</div><div class="af-s">Netlify &middot; JavaScript &middot; JSON &middot; Supabase</div><span class="af-pill af-live">Live</span></div>
+          </div>
+          <p class="af-note">RAG is an optional retrieval branch, not a step in every numerical forecast. Forecasting models receive structured time-series data directly.</p>
+        </div>
+
+        <div class="card" style="margin-bottom:16px">
+          <div class="card-header"><div><div class="card-title">Updated AI orchestration layer</div><div class="card-sub">LangChain.js integrates, LangGraph.js coordinates, PyTorch trains. None of them adds a foundation-model dependency.</div></div></div>
+          <div class="arch-flow">
+            <div class="af-box af-blue"><div class="af-t">JavaScript + JSON</div><div class="af-s">Existing Netlify application</div></div>
+            <div class="af-arrow">&darr;</div>
+            <div class="af-box af-green"><div class="af-t">LangChain.js <span class="af-pill af-add">Add</span></div><div class="af-s">Prompt templates &middot; Custom model interfaces &middot; Retrievers &middot; Structured outputs &middot; Tools</div></div>
+            <div class="af-arrow">&darr;</div>
+            <div class="af-box af-purple"><div class="af-t">LangGraph.js <span class="af-pill af-add">Add</span></div><div class="af-s">Workflow orchestration &middot; State management &middot; Branching &middot; Error handling</div></div>
+            <div class="af-arrow">&darr;</div>
+            <div class="af-grid">
+              <div class="af-box"><div class="af-t">Custom Transformer</div><div class="af-s">Python / PyTorch</div></div>
+              <div class="af-box"><div class="af-t">Forecasting</div><div class="af-s">LSTM / TCN / TFT</div></div>
+              <div class="af-box"><div class="af-t">Custom embeddings</div><div class="af-s">PyTorch</div></div>
+              <div class="af-box"><div class="af-t">NLP classifiers</div><div class="af-s">Custom-trained</div></div>
+            </div>
+            <div class="af-arrow">&darr;</div>
+            <div class="af-box"><div class="af-t">Supabase + pgvector</div><div class="af-s">SQL &middot; JSONB &middot; Semantic retrieval</div></div>
+          </div>
+        </div>
+
+        <div class="card" style="margin-bottom:16px">
+          <div class="card-header"><div><div class="card-title">Four You Consultants AI model suite</div><div class="card-sub">Entirely custom-trained weights</div></div></div>
+          <div class="suite-grid">
+            <div class="suite"><div class="suite-n">FourYou-Transformer v1</div><div class="suite-big">35M</div><div class="suite-s">Custom decoder-only language model. Causal pretraining followed by instruction SFT. 8 layers &middot; 8 heads &middot; 512 hidden &middot; 2,048 feed-forward &middot; 512-token context &middot; 16K BPE vocabulary &middot; RoPE &middot; RMSNorm &middot; SwiGLU &middot; tied embeddings.</div><span class="af-pill af-plan">Proposed &middot; not yet trained</span></div>
+            <div class="suite"><div class="suite-n">FourYou-Embed v1</div><div class="suite-big">384D</div><div class="suite-s">Custom semantic embedding network: 6-layer encoder, mean pooling + projection, L2-normalized. Contrastive (InfoNCE) learning with hard negatives; vectors stored in Supabase pgvector.</div><span class="af-pill af-plan">Vector store live &middot; encoder planned</span></div>
+            <div class="suite"><div class="suite-n">FourYou-Forecast v1</div><div class="suite-big">Multi-model</div><div class="suite-s">LSTM &middot; GRU &middot; TCN &middot; TFT. Multi-horizon (7 / 14 / 30 days) with 80% prediction intervals, chosen by walk-forward validation against last-value, moving-average, seasonal-naive and LightGBM baselines.</div><span class="af-pill af-plan">Planned</span></div>
+            <div class="suite"><div class="suite-n">FourYou-NLP v1</div><div class="suite-big">Multi-task</div><div class="suite-s">Sentiment &middot; Topics &middot; Emotion &middot; Classification. Custom-trained Transformer encoder with task-specific heads.</div><span class="af-pill af-plan">Planned</span></div>
+          </div>
+          <div class="table-scroll" style="margin-top:16px"><table class="data-table">
+            <thead><tr><th>Layer</th><th>Technology</th><th>Status here</th></tr></thead>
+            <tbody>
+              <tr><td>Application</td><td>JavaScript</td><td>Live</td></tr>
+              <tr><td>Data interchange</td><td>JSON</td><td>Live</td></tr>
+              <tr><td>Database</td><td>Supabase PostgreSQL</td><td>Live</td></tr>
+              <tr><td>Vector database</td><td>Supabase pgvector (content_embeddings, 384-dim, HNSW cosine index)</td><td>Live, empty until the encoder is trained</td></tr>
+              <tr><td>Feature store</td><td>Frozen fy_features_v1 (fixed log transforms, never refit)</td><td>Live</td></tr>
+              <tr><td>Language model</td><td>Custom PyTorch Transformer</td><td>Planned</td></tr>
+              <tr><td>Tokenizer</td><td>Custom BPE (Hugging Face Tokenizers, empty vocabulary)</td><td>Planned</td></tr>
+              <tr><td>Embeddings</td><td>Custom contrastive encoder</td><td>Planned</td></tr>
+              <tr><td>Forecasting</td><td>LSTM / GRU / TCN / TFT</td><td>Planned (today: engagement network in a Supabase edge function)</td></tr>
+              <tr><td>NLP</td><td>Custom Transformer classifiers</td><td>Planned (today: content-type classifier)</td></tr>
+              <tr><td>Model training</td><td>PyTorch on Kaggle (primary), Colab (backup)</td><td>Planned</td></tr>
+              <tr><td>Browser ML</td><td>TensorFlow.js</td><td>Live</td></tr>
+              <tr><td>Prompt engineering / integration</td><td>LangChain.js</td><td>Planned</td></tr>
+              <tr><td>Workflow orchestration</td><td>LangGraph.js</td><td>Planned</td></tr>
+              <tr><td>Backend API</td><td>FastAPI</td><td>Planned</td></tr>
+              <tr><td>Experiment tracking</td><td>MLflow + model_evaluations / training_jobs tables</td><td>Tables live, MLflow planned</td></tr>
+              <tr><td>Hosting</td><td>Netlify + separate inference service</td><td>Netlify live</td></tr>
+            </tbody></table></div>
+          <p class="af-note">Rules kept from the brief: synthetic data is always labelled; forecasting stays separate from language generation; embeddings are trained and evaluated on their own; every tokenizer, dataset, checkpoint and evaluation is versioned; weights live in private Supabase Storage, never in database rows.</p>
+        </div>
 
         <div class="card" style="margin-bottom:16px">
           <div class="card-title" style="margin-bottom:12px">How to get real TikTok numbers into this app</div>
@@ -779,7 +883,7 @@ code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;colo
             <div class="settings-title">Your account</div>
             <div class="settings-row"><div><div class="settings-label">Signed in as</div><div class="settings-desc" id="set-email">--</div></div><span class="badge badge-green" id="set-auth">Active</span></div>
             <div class="settings-row"><div><div class="settings-label">User id</div><div class="settings-desc" id="set-uid" style="word-break:break-all">--</div></div></div>
-            <div class="settings-row"><div><div class="settings-label">Change password</div><div class="settings-desc">Sends a recovery email</div></div><button class="btn btn-ghost" style="font-size:11px;padding:5px 10px" onclick="openForgot()">Send link</button></div>
+
             <div class="settings-row"><div><div class="settings-label">Sign out</div><div class="settings-desc">Ends this session</div></div><button class="btn btn-ghost" style="font-size:11px;padding:5px 10px" onclick="signOut()">Sign out</button></div>
           </div>
           <div class="card">
@@ -1179,6 +1283,7 @@ function exitLocalMode(){
 function isLocalMode(){ return LOCAL_MODE; }
 
 async function signOut(){
+  if (window.FY && FY.session && !(FY.session.user && FY.session.user.is_anonymous)){ return FY.auth.signOut(); }
   if (LOCAL_MODE){
     showModal('Leave local mode?',
       '<p style="font-size:13px;color:var(--text2)">Your clients and metrics stay on this device. '+
@@ -1390,7 +1495,8 @@ const DB = {
           const demo=all.filter(c=>this.isStarter(c));
           demo.forEach(c=>{ try{ sb.from('clients').delete().eq('id',c.id).then(()=>{},()=>{}); }catch(e){} });
           this.clients=all.filter(c=>!this.isStarter(c));
-          this.activeId=this.clients[0]?this.clients[0].id:null;
+          const pref=(window.FY&&FY.state&&FY.state.current&&FY.state.current.activeClient)||this.activeId;
+          this.activeId=(this.clients.find(c=>c.id===pref)||this.clients[0]||{}).id||null;
           this.loadError=null;
           return;
         }
@@ -1417,7 +1523,8 @@ const DB = {
           payload:c, is_active:true, updated_at:new Date().toISOString()
         });
         if (r.error) throw r.error;
-        setText('db-status','Supabase \u2713');
+        if (window.FY) FY.sync.notifyLocalWrite('clients', c.id);
+        setText('db-status','Synced \u2713');
       }catch(e){
         console.warn('client upsert failed',e);
         setText('db-status','Not saved');
@@ -1436,7 +1543,9 @@ const DB = {
   },
 
   active(){ return this.clients.find(c=>c.id===this.activeId) || this.clients[0] || null; },
-  setActive(id){ this.activeId=id; }
+  setActive(id){ this.activeId=id;
+    if (window.FY && FY.session && typeof APPLYING_REMOTE_STATE!=='undefined' && !APPLYING_REMOTE_STATE) FY.state.set({ activeClient:id });
+    if (window.FY && FY.session && id) FY.stream.open(id); }
 };
 
 /* ---------- Role: owner vs admin ---------- */
@@ -1625,7 +1734,7 @@ const Stat = {
    model.getWeights() and rendered in the AI Insights view.
 ============================================================ */
 const NET = {
-  FEATURE_VERSION:3,   /* bump when the inputs change: older saved models would read them wrongly */
+  FEATURE_VERSION:4,   /* v4 = frozen fy_features_v1 transforms; must match js/net-core.js */
   reg:null, clf:null,
   lossHistory:[], trained:false, training:false,
   metrics:{ mae:0, rmse:0, r2:0, epochs:0, params:0, backend:'', rows:0 },
@@ -1742,11 +1851,11 @@ function goView(name, el){
   const v=document.getElementById('view-'+name); if(v) v.classList.add('active');
   if (el) el.classList.add('active');
   else {
-    const map={dashboard:0,clients:1,analytics:2,ai:3,reports:4,alerts:5,architecture:6,settings:7};
-    const items=document.querySelectorAll('.nav-item');
-    if (items[map[name]]) items[map[name]].classList.add('active');
+    const hit=Array.prototype.find.call(document.querySelectorAll('.nav-item'), n=>(n.getAttribute('onclick')||'').indexOf("goView('"+name+"'")>-1);
+    if (hit) hit.classList.add('active');
   }
   if (window.innerWidth<=768) closeSidebar();
+  if (window.FY && FY.session && !APPLYING_REMOTE_STATE) FY.state.set({ view:name });
   if (name==='analytics') renderAnalytics();
   if (name==='ai') renderAI();
   if (name==='reports') renderReports();
@@ -2941,6 +3050,10 @@ let pendingImport=null;
 
 function openImport(){
   showModal('Import metrics',
+    '<div class="callout callout-info" style="margin-bottom:14px;border-color:var(--gold)"><strong>Fastest: the fill-in-the-blank template.</strong> '+
+    'One file covers every platform; each platform uploads as its own batch straight into the database.<br/><br/>'+
+    '<button class="btn btn-primary" style="font-size:12px;margin-right:8px" onclick="importTemplate()">\u2191 Upload filled template (.xlsx)</button>'+
+    '<a class="btn btn-ghost" style="font-size:12px" href="FourYou_Client_Template_v1.xlsx" download>\u2193 Download blank template</a></div>'+
     '<div class="callout callout-info" style="margin-bottom:14px">'+
     'Export from the platform first. TikTok: tiktok.com \u2192 Analytics \u2192 Download data. '+
     'Instagram and Facebook: Meta Business Suite \u2192 Insights \u2192 Export. '+
@@ -3613,7 +3726,7 @@ async function launchApp(){
     setText('set-email', email);
     setText('set-uid', LOCAL_MODE ? 'no account \u2014 local storage'
             : (SESSION&&SESSION.user? SESSION.user.id : 'not signed in'));
-    setText('db-status', LOCAL_MODE ? 'Local' : 'Supabase');
+    setText('db-status', LOCAL_MODE ? 'Local' : ((window.FY&&FY.sync.status==='live') ? 'Synced \u2713' : 'Supabase'));
 
     const anon = !!(SESSION && SESSION.user && SESSION.user.is_anonymous);
     if (anon){ setText('tb-user','Device'); setText('tb-initials','DV');
@@ -3639,7 +3752,10 @@ async function launchApp(){
     }
 
     await DB.load();
-    await migrateLocalToCloud();
+    try{ const k='fy_local_migrated_'+(SESSION&&SESSION.user?SESSION.user.id:'');
+         if (!localStorage.getItem(k) && localStorage.getItem('fy_clients_v3')){ await migrateLocalToCloud(); await DB.load(); localStorage.setItem(k,new Date().toISOString()); } }catch(e){}
+    await ensureDemoClient();
+    await applySavedUiState();
     renderClients();
     await renderDashboard();
     renderAlerts();
@@ -3667,19 +3783,16 @@ window.addEventListener('DOMContentLoaded', function(){
   const qs=new URLSearchParams(location.search);
   const hash=location.hash||'';
 
-  if (qs.get('recovery')==='1' || hash.indexOf('type=recovery')>-1){
-    setTimeout(openSetPassword,400);
-    return;
-  }
+  /* password recovery by email is switched off for this site */
+  if (qs.get('recovery')==='1' || hash.indexOf('type=recovery')>-1){ history.replaceState(null,'',location.pathname); }
 
-  /* No login screen: connect to the database in the background and open the app. */
-  if (sb){
-    sb.auth.onAuthStateChange((event, session)=>{
-      if (event==='SIGNED_OUT'){ SESSION=null; }
-      else if (session){ SESSION=session; }
-    });
-  }
-  startLocalMode();
+  /* Username + password sign-in. The same account on any device sees the same data. */
+  if (!sb || !window.FY){ deviceAccountFailed('The database library did not load. Check your connection and reload.'); return; }
+  try{ localStorage.removeItem(LOCAL_KEY); }catch(e){}
+  FY.init({ client: sb });
+  sb.auth.onAuthStateChange((event, session)=>{ if (event==='SIGNED_OUT'){ SESSION=null; } else if (session){ SESSION=session; } });
+  wirePlatformSync();
+  FY.auth.require().then(session=>{ SESSION=session; LOCAL_MODE=false; launchApp(); });
   return;
 
   if (sb){
@@ -3796,8 +3909,7 @@ function renderAdmin(){
         '<td style="color:var(--text2)">'+(u.last_sign_in_at? String(u.last_sign_in_at).slice(0,16).replace('T',' '):'\u2014')+'</td>'+
         '<td><span class="badge '+stat+'">'+esc(u.account_status)+'</span></td>'+
         '<td>'+(u.clients||0)+'</td><td>'+(u.metric_weeks||0)+'</td>'+
-        '<td><button class="btn btn-ghost" style="font-size:11px;padding:3px 8px" '+
-          'onclick="sendUserReset(\''+esc(u.email)+'\')">Reset link</button></td></tr>';
+        '<td style="color:var(--text3)">\u2014</td></tr>';
     }).join(''));
   } else {
     setHTML('ad-accounts', ADMIN.accounts.length? ADMIN.accounts.map(a=>
@@ -4265,6 +4377,7 @@ function syncRangeButtons(){
 function setRange(r){
   if(!RANGES[r]) return;
   RANGE=r;
+  if (window.FY && FY.session && !APPLYING_REMOTE_STATE) FY.state.set({ range:r });
   syncRangeButtons();
   renderDashboard();
   renderAnalytics();
@@ -4420,8 +4533,9 @@ function renderAIPlain(c){
   }
   const m=NET.metrics;
   let rng=1;
-  try{ const nm=NET.norms[c.primary].er; rng=(nm.hi-nm.lo)||1; }catch(e){}
-  const miss=m.mae*rng;
+  let miss=null;
+  try{ const s0=c.series[c.primary]; const mean=s0.er.reduce((a,b)=>a+b,0)/s0.er.length; miss=FYNetCore.missPoints(m.mae, mean); }catch(e){}
+  if (miss==null || !isFinite(miss)) miss=m.mae*rng;
   const lh=NET.lossHistory, l0=lh.length?lh[0]:0, l1=lh.length?lh[lh.length-1]:0;
   const drop=l0>0 ? Math.round((1-l1/l0)*100) : 0;
   const trust = m.rows<8 ? ['🔴 Low','var(--red)'] : (m.rows<20 ? ['🟡 Moderate','var(--amber)'] : ['🟢 Reasonable','var(--green)']);
@@ -4666,22 +4780,132 @@ async function migrateLocalToCloud(){
   try{ localStorage.removeItem('fy_clients_v3'); }catch(e){}
 }
 </script>
-<div id="fy-build" style="position:fixed;left:8px;bottom:6px;z-index:5;font-size:10px;color:var(--text3);opacity:.7;pointer-events:none">Build 2026-11-02.12</div>
-<script src="js/dl-activations.js?v=2026-11-02.12"></script>
-<script src="js/dl-cnn.js?v=2026-11-02.12"></script>
-<script src="js/dl-rnn.js?v=2026-11-02.12"></script>
-<script src="js/dl-gan.js?v=2026-11-02.12"></script>
-<script src="js/client-backup.js?v=2026-11-02.12"></script>
-<script src="js/mkt-benchmarks.js?v=2026-11-02.12"></script>
-<script src="js/mkt-metrics.js?v=2026-11-02.12"></script>
-<script src="js/mkt-lifecycle.js?v=2026-11-02.12"></script>
-<script src="js/dl-guardrails.js?v=2026-11-02.12"></script>
-<script src="js/dl-backtest.js?v=2026-11-02.12"></script>
-<script src="js/model-store.js?v=2026-11-02.12"></script>
-<script src="js/model-explain.js?v=2026-11-02.12"></script>
-<script src="js/net-core.js?v=2026-11-02.12"></script>
-<script src="js/model-sync.js?v=2026-11-02.12"></script>
-<script src="js/dl-lab.js?v=2026-11-02.12"></script>
-<script src="js/mkt-ui.js?v=2026-11-02.12"></script>
+<div id="fy-build" style="position:fixed;left:8px;bottom:6px;z-index:5;font-size:10px;color:var(--text3);opacity:.7;pointer-events:none">Build 2026-11-06.1</div>
+<script src="js/dl-activations.js?v=2026-11-06.1"></script>
+<script src="js/dl-cnn.js?v=2026-11-06.1"></script>
+<script src="js/dl-rnn.js?v=2026-11-06.1"></script>
+<script src="js/dl-gan.js?v=2026-11-06.1"></script>
+<script src="js/client-backup.js?v=2026-11-06.1"></script>
+<script src="js/mkt-benchmarks.js?v=2026-11-06.1"></script>
+<script src="js/mkt-metrics.js?v=2026-11-06.1"></script>
+<script src="js/mkt-lifecycle.js?v=2026-11-06.1"></script>
+<script src="js/dl-guardrails.js?v=2026-11-06.1"></script>
+<script src="js/dl-backtest.js?v=2026-11-06.1"></script>
+<script src="js/model-store.js?v=2026-11-06.1"></script>
+<script src="js/model-explain.js?v=2026-11-06.1"></script>
+<script src="js/net-core.js?v=2026-11-06.1"></script>
+<script src="js/model-sync.js?v=2026-11-06.1"></script>
+<script src="js/dl-lab.js?v=2026-11-06.1"></script>
+<script src="js/mkt-ui.js?v=2026-11-06.1"></script>
+<script>/* ============================================================
+   CROSS-DEVICE + MULTI-TAB SYNC  (database is the source of truth)
+============================================================ */
+let APPLYING_REMOTE_STATE=false, SYNC_WIRED=false;
+function modalOpen(){ const o=document.getElementById('modal-overlay'); return !!(o && o.classList.contains('open')); }
+function wirePlatformSync(){
+  if (SYNC_WIRED) return; SYNC_WIRED=true;
+  let pendingRefresh=false;
+  async function refreshFromDb(reason){
+    if (modalOpen()){ pendingRefresh=true; return; }          // never wipe a form someone is typing in
+    pendingRefresh=false;
+    await DB.load();
+    const c=DB.active();
+    if (c){ setText('tb-client',c.name); setText('tb-avatar',c.avatar); }
+    renderClients(); await renderDashboard(); renderAlerts();
+    const av=document.querySelector('.view.active');
+    if (av && av.id==='view-analytics') renderAnalytics();
+    if (reason) toast(reason,'info');
+  }
+  window.addEventListener('fy:remote-change', ev=>{
+    const d=ev.detail||{};
+    if (['clients','metrics_weekly','posts'].indexOf(d.table)>-1)
+      refreshFromDb(d.source==='tab' ? '' : 'Updated from another device');
+  });
+  setInterval(()=>{ if (pendingRefresh && !modalOpen()) refreshFromDb(''); }, 1500);
+  window.addEventListener('fy:sync-status', ev=>{
+    const s=(ev.detail||{}).status;
+    setText('db-status', s==='live' ? 'Synced ✓' : (s==='off'?'Supabase':'Connecting…'));
+  });
+  window.addEventListener('fy:ui-state', ev=>{
+    const d=ev.detail||{}, st=d.state||{};
+    if (d.source==='load') return;                         // applied inside launchApp
+    APPLYING_REMOTE_STATE=true;
+    try{
+      if (st.range && st.range!==RANGE && RANGES[st.range]){ RANGE=st.range; syncRangeButtons(); renderDashboard(); }
+    } finally { APPLYING_REMOTE_STATE=false; }
+  });
+  // remember scroll position per view (restored when that view opens on any device)
+  let scrollT=null;
+  window.addEventListener('scroll', ()=>{
+    if (!window.FY || !FY.session) return;
+    clearTimeout(scrollT);
+    scrollT=setTimeout(()=>{ const av=document.querySelector('.view.active'); if(!av) return;
+      const sc=Object.assign({}, (FY.state.current||{}).scroll||{}); sc[av.id]=Math.round(window.scrollY); FY.state.set({scroll:sc}); }, 600);
+  }, {passive:true});
+  document.addEventListener('visibilitychange', ()=>{ if (document.visibilityState==='hidden' && window.FY) FY.state.flush(); });
+}
+async function applySavedUiState(){
+  if (!window.FY || !FY.session) return;
+  const st=FY.state.current||{};
+  APPLYING_REMOTE_STATE=true;
+  try{
+    if (st.range && RANGES[st.range]){ RANGE=st.range; syncRangeButtons(); }
+    if (st.activeClient && DB.clients.some(c=>c.id===st.activeClient) && DB.activeId!==st.activeClient){
+      DB.setActive(st.activeClient); const c=DB.active(); setText('tb-client',c.name); setText('tb-avatar',c.avatar);
+    }
+    if (st.view && document.getElementById('view-'+st.view)) goView(st.view);
+    const y=st.scroll && st.view ? st.scroll['view-'+st.view] : 0;
+    if (y) setTimeout(()=>window.scrollTo(0,y), 400);
+  } finally { APPLYING_REMOTE_STATE=false; }
+  const c=DB.active(); if (c) FY.stream.open(c.id);
+}
+async function importTemplate(){
+  const inp=document.createElement('input'); inp.type='file'; inp.accept='.xlsx';
+  inp.onchange=async ()=>{
+    const f=inp.files[0]; if (!f) return;
+    let parsed;
+    try{ parsed=await FY.importer.parse(f); }catch(e){ toast(e.message,'error',8000); return; }
+    if (!parsed.batches.length){ toast('No filled-in rows were found in the template.','error',6000); return; }
+    window.__FY_PARSED=parsed;
+    const rows=parsed.batches.map(b=>'<tr><td>'+esc((PLATFORMS[b.platform]||{}).label||b.platform)+'</td><td>'+b.weeks.length+'</td><td>'+b.posts.length+'</td><td>'+
+      (b.weeks.length? esc(b.weeks[0].week_start)+' → '+esc(b.weeks[b.weeks.length-1].week_start) : '—')+'</td></tr>').join('');
+    const skipped=parsed.problems.length ? '<div class="callout callout-warn" style="margin-top:12px"><strong>'+parsed.problems.length+' row(s) will be skipped:</strong><br/>'+
+      parsed.problems.slice(0,8).map(esc).join('<br/>')+'</div>' : '';
+    showModal('Upload this template?',
+      '<div style="font-size:13px;color:var(--text2);margin-bottom:10px">Client: <strong style="color:var(--text)">'+esc(parsed.client.name||'(unnamed)')+'</strong> · file '+esc(parsed.fileName)+'</div>'+
+      '<div class="table-scroll"><table class="data-table"><thead><tr><th>Platform batch</th><th>Weeks</th><th>Posts</th><th>Period</th></tr></thead><tbody>'+rows+'</tbody></table></div>'+skipped+
+      '<div style="font-size:12px;color:var(--text2);margin-top:12px">Each platform is saved as its own batch. Re-uploading the same file is detected and skipped.</div>',
+      '<button class="btn btn-ghost" onclick="closeModal()">Cancel</button><button class="btn btn-primary" id="tpl-go" onclick="confirmTemplateUpload()">Upload to database</button>');
+  };
+  inp.click();
+}
+async function confirmTemplateUpload(){
+  const parsed=window.__FY_PARSED; if (!parsed) return;
+  const go=document.getElementById('tpl-go'); if (go){ go.disabled=true; go.textContent='Uploading…'; }
+  let res;
+  try{ res=await FY.importer.upload(parsed, null); }catch(e){ toast('Upload failed: '+(e.message||e),'error',8000); if(go){go.disabled=false;go.textContent='Upload to database';} return; }
+  const lines=(res.results||[]).map(r=> r.error ? r.platform+': '+r.error :
+    r.duplicate ? 'already uploaded' : (r.platform+': '+r.weeks+' weeks, '+r.posts+' posts'+(r.rejected?(' ('+r.rejected+' skipped)'):''))).join(' · ');
+  closeModal();
+  await DB.load(); DB.setActive(res.clientId);
+  const cc=DB.active(); if (cc){ setText('tb-client',cc.name); setText('tb-avatar',cc.avatar); }
+  renderClients(); await renderDashboard(); renderAlerts();
+  toast('Saved to the database — '+lines,'success',7000);
+  if (cc && hasEnoughToTrain(cc)) retrainModels();
+}
+
+/* Keep the DEMO sample client in every signed-in account (added once; delete it and it stays deleted) */
+async function ensureDemoClient(){
+  if (!window.FY || !FY.session || typeof window.fyBuildDemo!=='function') return;
+  const st=FY.state.current||{};
+  if (st.demoSeeded) return;
+  if (!DB.clients.some(c=>c.is_demo || String(c.id).indexOf('demo-sample-client')===0)){
+    const demo=window.fyBuildDemo(Date.now());
+    await DB.save(demo);
+    if (!DB.activeId) DB.activeId=demo.id;
+  }
+  FY.state.set({ demoSeeded:true });
+}
+</script>
 </body>
 </html>

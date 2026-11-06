@@ -7,9 +7,15 @@
 import "https://raw.githubusercontent.com/jeremywashington99-netizen/jeremywashington99-netizen-foryouconsultants/606e915e30397480e9d50bce1c2e575ec1324bd1/js/dl-guardrails.js";
 import "https://raw.githubusercontent.com/jeremywashington99-netizen/jeremywashington99-netizen-foryouconsultants/606e915e30397480e9d50bce1c2e575ec1324bd1/js/mini-mlp.js";
 import "https://raw.githubusercontent.com/jeremywashington99-netizen/jeremywashington99-netizen-foryouconsultants/606e915e30397480e9d50bce1c2e575ec1324bd1/js/net-core.js";
+import "./net-core-v4.js";
 
 // deno-lint-ignore no-explicit-any
 const g: any = globalThis;
+// Two network cores: v3 (min-max scaling, for pages not yet updated) and v4 (frozen fy_features_v1 transforms).
+// A page says which one it uses with body.feature_version; anything else gets v3, so no open page breaks.
+const CORE_V3 = g.FYNetCore;
+const CORE_V4 = g.FYNetCoreV4;   // set by ./net-core-v4.js (same file as the site's js/net-core.js, under its own name)
+const coreFor = (fv: unknown) => (fv === 4 && CORE_V4 && CORE_V4.FEATURE_VERSION === 4) ? CORE_V4 : CORE_V3;
 const CLASSES = ["Event setup", "Product / recipe", "POV hook", "Behind the scenes", "Announcement", "Static graphic"];
 const URL_ = Deno.env.get("SUPABASE_URL")!;
 const ANON = Deno.env.get("SUPABASE_ANON_KEY")!;
@@ -48,7 +54,8 @@ Deno.serve(async (req) => {
   try { body = await req.json(); } catch { return json(400, { ok: false, error: "request was not valid JSON" }); }
   const clientId = body && body.client_id;
   if (typeof clientId !== "string" || !CLIENT_ID.test(clientId)) return json(400, { ok: false, error: "client_id missing" });
-  const bad = g.FYNetCore.validateClient(body.client);
+  const Core = coreFor(body && body.feature_version);
+  const bad = Core.validateClient(body.client);
   if (bad) return json(400, { ok: false, error: bad });
 
   // the client must be one this account owns
@@ -64,7 +71,7 @@ Deno.serve(async (req) => {
 
   const t0 = performance.now();
   const c = body.client;
-  const net = g.FYNetCore.create({ Mlp: g.FYMlp, G: g.FYGuard, classes: CLASSES });
+  const net = Core.create({ Mlp: g.FYMlp, G: g.FYGuard, classes: CLASSES });
   try {
     const st = await net.train(c);
     const row = await net.runRow(st, c, { owner_id: user.id, client_id: clientId });
@@ -72,7 +79,7 @@ Deno.serve(async (req) => {
     const ins = await rest(auth, "model_runs?select=id,trained_at", { method: "POST", headers: { prefer: "return=representation" }, body: JSON.stringify(row) });
     if (!ins.ok) return json(502, { ok: false, error: "trained, but the database refused the save: " + (await ins.text()).slice(0, 200) });
     const saved = ((await ins.json()) || [])[0] || {};
-    return json(200, { ok: true, run_id: saved.id, trained_at: saved.trained_at, rows: m.rows, epochs: m.epochs, ms: Math.round(performance.now() - t0) });
+    return json(200, { ok: true, run_id: saved.id, trained_at: saved.trained_at, rows: m.rows, epochs: m.epochs, feature_version: Core.FEATURE_VERSION, ms: Math.round(performance.now() - t0) });
   } catch (e) {
     return json(422, { ok: false, error: String((e && (e as Error).message) || e) });
   }

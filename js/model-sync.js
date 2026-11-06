@@ -30,7 +30,7 @@
   }
   function liveNorms(n) {
     const out = {};
-    Object.keys(n || {}).forEach(function (pk) { out[pk] = {}; Object.keys(n[pk]).forEach(function (k) { out[pk][k] = mm(n[pk][k]); }); });
+    Object.keys(n || {}).forEach(function (pk) { out[pk] = {}; Object.keys(n[pk]).forEach(function (k) { out[pk][k] = (n[pk][k] && n[pk][k].frozen && typeof FYNetCore !== 'undefined' && FYNetCore.FROZEN[k]) ? FYNetCore.FROZEN[k] : mm(n[pk][k]); }); });
     return out;
   }
 
@@ -69,7 +69,7 @@
         res = await fetch(SB_URL + '/functions/v1/train-net', {
           method: 'POST', signal: ctl.signal,
           headers: { authorization: 'Bearer ' + tok, apikey: SB_PUBLISHABLE_KEY, 'content-type': 'application/json' },
-          body: JSON.stringify({ client_id: c.id, client: payload(c) })
+          body: JSON.stringify({ client_id: c.id, client: payload(c), feature_version: NET.FEATURE_VERSION })
         });
         out = await res.json().catch(function () { return null; });
       } catch (e) {

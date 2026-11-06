@@ -527,6 +527,7 @@
     };
   }
 
+  window.fyBuildDemo = buildDemo;   /* used to keep the demo client in every account */
   window.fyLoadDemo = async function () {
     const demo = buildDemo(Date.now());
     const existing = allClients().find(c => c.id === demo.id);

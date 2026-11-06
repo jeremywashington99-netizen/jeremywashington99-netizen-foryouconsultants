@@ -21,7 +21,36 @@
 })(typeof self !== 'undefined' ? self : this, function () {
   'use strict';
 
-  const FEATURE_VERSION = 3;   /* bump when the inputs change: older saved models would read them wrongly */
+  const FEATURE_VERSION = 4;   /* bump when the inputs change: older saved models would read them wrongly.
+                                 v4 = FROZEN fixed transforms (fy_features_v1): nothing is fitted to data, ever. */
+
+  /* ---- Frozen, deterministic transforms (identical to public.fy_scale in the database and FY.features in the page).
+     Fixed constants only: the same raw value always maps to the same feature value, on every device, forever.
+     The signed log compresses both tails, so a sudden audience gain or loss cannot dominate. ---- */
+  const LN = Math.log;
+  const round6 = v => { const s = v < 0 ? -1 : 1; return s * Math.round(Math.abs(v) * 1e6 + 1e-9) / 1e6; };
+  const slog = x => Math.sign(x) * LN(1 + Math.abs(x));
+  const pos = x => Math.max(x, 0);
+  const SCALE = {
+    engagement_rate:   x => LN(1 + pos(x)) / LN(101),
+    followers:         x => LN(1 + pos(x)) / LN(1 + 1e9),
+    views:             x => LN(1 + pos(x)) / LN(1 + 1e10),
+    count_small:       x => LN(1 + pos(x)) / LN(101),
+    rate:              x => LN(1 + 100 * pos(x)) / LN(101),
+    follower_delta:    x => slog(x) / slog(1e7),
+    pct_change:        x => slog(x) / slog(1000)
+  };
+  function scale(kind, x) { if (x === null || x === undefined || !Number.isFinite(+x)) return 0; return round6(SCALE[kind](+x)); }
+  const FROZEN = {
+    er:    { frozen: true, kind: 'engagement_rate', lo: 0, hi: 100,  norm: v => scale('engagement_rate', v), denorm: y => Math.exp(y * LN(101)) - 1 },
+    fol:   { frozen: true, kind: 'followers',       lo: 0, hi: 1e9,  norm: v => scale('followers', v),       denorm: y => Math.exp(y * LN(1 + 1e9)) - 1 },
+    reach: { frozen: true, kind: 'views',           lo: 0, hi: 1e10, norm: v => scale('views', v),           denorm: y => Math.exp(y * LN(1 + 1e10)) - 1 }
+  };
+  /* ER points that one unit of scaled error corresponds to, at a given engagement level */
+  function missPoints(maeScaled, meanER) {
+    const m = Number.isFinite(meanER) ? meanER : 5;
+    return Math.abs(FROZEN.er.denorm(FROZEN.er.norm(m) + maeScaled) - m);
+  }
 
   const Stat = {
     mean: a => a.reduce((x, y) => x + y, 0) / a.length,
@@ -32,22 +61,22 @@
     minmax(a) { const lo = Stat.min(a), hi = Stat.max(a); return { lo: lo, hi: hi, norm: v => hi === lo ? 0.5 : (v - lo) / (hi - lo), denorm: v => v * (hi - lo) + lo }; }
   };
 
-  /* Feature vector for week i of a platform series: 7 inputs, all scaled into 0..1. */
+  /* Feature vector for week i of a platform series: 7 inputs from FIXED transforms.
+     Each input depends only on week i and the two weeks before it, so no future week can leak in
+     (guardrail 5), and adding new weeks never changes the inputs of an old week. The norms argument
+     is kept for the callers' signature; the frozen scalers are always used. */
   function features(s, i, norms) {
     const prevER = i > 0 ? s.er[i - 1] : s.er[0];
     const prevER2 = i > 1 ? s.er[i - 2] : prevER;
-    /* running maximum: only weeks up to i, so no future week leaks in (guardrail 5) */
-    const postRate = s.posts[i] / Math.max(1, Math.max.apply(null, s.posts.slice(0, i + 1)));
-    const paidShare = s.paid[i] > 0 ? 1 : 0;
-    const saveRate = s.saves[i] / Math.max(1, s.reach[i]) * 100;
+    const reach = (s.reach || [])[i] || 0, saves = (s.saves || [])[i] || 0;
     return [
-      norms.er.norm(s.er[i]),
-      norms.er.norm(prevER),
-      norms.er.norm(prevER2),
-      norms.fol.norm(s.followers[i]),
-      postRate,
-      paidShare,
-      Math.min(1, saveRate / 5)
+      scale('engagement_rate', s.er[i]),
+      scale('engagement_rate', prevER),
+      scale('engagement_rate', prevER2),
+      scale('followers', s.followers[i]),
+      scale('count_small', (s.posts || [])[i] || 0),
+      (s.paid || [])[i] > 0 ? 1 : 0,
+      reach > 0 ? scale('rate', saves / reach) : 0
     ];
   }
 
@@ -99,7 +128,7 @@
 
       client.platforms.forEach(pk => {
         const s = client.series[pk]; if (!s) return;
-        const norms = { er: Stat.minmax(s.er), fol: Stat.minmax(s.followers), reach: Stat.minmax(s.reach) };
+        const norms = FROZEN;   /* fixed scaler: never fitted, never refit */
         platNorms[pk] = norms;
         /* guardrails 4 + 5: skip impossible/missing weeks, and prove week i never sees week i+1 */
         const vs = G ? G.validateSeries(s) : { issues: [], bad: {} };
@@ -201,7 +230,7 @@
         m.epochs = state.lossHistory.length;
         m.rows = X.length;
         m.params = (reg ? reg.countParams() : 0) + (clf ? clf.countParams() : 0);
-        state.lastFit = { actual: av, predicted: pv, labels: av.map((_, i) => 's' + (i + 1)) };
+        state.lastFit = { actual: av.map(v => +FROZEN.er.denorm(v).toFixed(2)), predicted: pv.map(v => +Math.max(0, FROZEN.er.denorm(v)).toFixed(2)), labels: av.map((_, i) => 's' + (i + 1)) };
         }
 
         /* Softmax class scores per platform */
@@ -218,7 +247,7 @@
             state.guard = G.audit({ history: state.lossHistory, trainErr: trainErr, holdErr: holdErr, holdN: holdN, r2: state.metrics.r2, rows: X.length,
               classCounts: XC.length >= 3 ? state.classCounts : null, dataIssues: dataIssues, leak: leak, health: health,
               drift: G.drift(client.series[primary]), adapted: state.recencyWeighted,
-              holdPoints: (holdErr != null && platNorms[primary] && platNorms[primary].er) ? holdErr * ((platNorms[primary].er.hi - platNorms[primary].er.lo) || 1) : null,
+              holdPoints: holdErr != null ? missPoints(holdErr, Stat.mean(client.series[primary].er)) : null,
               scale: G.scaling(X), weeks: client.series[primary].er.length });
           }
         } catch (e) { state.guard = null; state.guardError = e.message; }
@@ -263,7 +292,8 @@
 
     function plainNorms(n) {
       const out = {};
-      Object.keys(n || {}).forEach(pk => { out[pk] = {}; Object.keys(n[pk]).forEach(k => { out[pk][k] = { lo: n[pk][k].lo, hi: n[pk][k].hi }; }); });
+      Object.keys(n || {}).forEach(pk => { out[pk] = {}; Object.keys(n[pk]).forEach(k => {
+        out[pk][k] = n[pk][k].frozen ? { frozen: true, kind: n[pk][k].kind, lo: n[pk][k].lo, hi: n[pk][k].hi } : { lo: n[pk][k].lo, hi: n[pk][k].hi }; }); });
       return out;
     }
 
@@ -275,9 +305,9 @@
       const forecast = {};
       for (const pk of c.platforms) { const f = await forecast_(st, c, pk, 6); if (f.length) forecast[pk] = f; }
       const m = st.metrics, pk0 = c.primary || c.platforms[0];
-      const n0 = st.norms[pk0] && st.norms[pk0].er, rng = n0 ? ((n0.hi - n0.lo) || 1) : null;
+      const s0 = c.series[pk0], meanER = s0 && s0.er.length ? Stat.mean(s0.er) : null;
       /* the plain-English wording is built in the page from these numbers */
-      const summary = { trained_on: 'supabase', missPoints: rng ? m.mae * rng : null, guardrails: st.guard || null };
+      const summary = { trained_on: 'supabase', missPoints: missPoints(m.mae, meanER), feature_spec: 'fy_features_v1', guardrails: st.guard || null };
       const weeks = Math.max.apply(null, c.platforms.map(pk => c.series[pk].er.length));
       return {
         owner_id: ctx.owner_id, client_id: ctx.client_id, kind: 'net', status: 'ok', model_name: 'engagement_network', framework: 'fy-mlp (plain JavaScript)',
@@ -320,5 +350,6 @@
     return null;
   }
 
-  return { FEATURE_VERSION: FEATURE_VERSION, Stat: Stat, features: features, create: create, validateClient: validateClient };
+  return { FEATURE_VERSION: FEATURE_VERSION, Stat: Stat, features: features, create: create, validateClient: validateClient,
+           FROZEN: FROZEN, scale: scale, slog: slog, missPoints: missPoints };
 });
