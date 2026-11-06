@@ -8,14 +8,19 @@ import "https://raw.githubusercontent.com/jeremywashington99-netizen/jeremywashi
 import "https://raw.githubusercontent.com/jeremywashington99-netizen/jeremywashington99-netizen-foryouconsultants/606e915e30397480e9d50bce1c2e575ec1324bd1/js/mini-mlp.js";
 import "https://raw.githubusercontent.com/jeremywashington99-netizen/jeremywashington99-netizen-foryouconsultants/606e915e30397480e9d50bce1c2e575ec1324bd1/js/net-core.js";
 import "./net-core-v4.js";
+import "./net-core-v5.js";
 
 // deno-lint-ignore no-explicit-any
 const g: any = globalThis;
-// Two network cores: v3 (min-max scaling, for pages not yet updated) and v4 (frozen fy_features_v1 transforms).
-// A page says which one it uses with body.feature_version; anything else gets v3, so no open page breaks.
+// Network cores: v3 (min-max scaling), v4 (frozen fy_features_v1 transforms) and v5 (same frozen transforms,
+// change-from-this-week output, 5-network ensemble). A page says which one it uses with body.feature_version;
+// anything else gets v3, so no open page breaks.
 const CORE_V3 = g.FYNetCore;
-const CORE_V4 = g.FYNetCoreV4;   // set by ./net-core-v4.js (same file as the site's js/net-core.js, under its own name)
-const coreFor = (fv: unknown) => (fv === 4 && CORE_V4 && CORE_V4.FEATURE_VERSION === 4) ? CORE_V4 : CORE_V3;
+const CORE_V4 = g.FYNetCoreV4;   // set by ./net-core-v4.js (the site's previous js/net-core.js, under its own name)
+const CORE_V5 = g.FYNetCoreV5;   // set by ./net-core-v5.js (same file as the site's js/net-core.js, under its own name)
+const coreFor = (fv: unknown) =>
+  (fv === 5 && CORE_V5 && CORE_V5.FEATURE_VERSION === 5) ? CORE_V5 :
+  (fv === 4 && CORE_V4 && CORE_V4.FEATURE_VERSION === 4) ? CORE_V4 : CORE_V3;
 const CLASSES = ["Event setup", "Product / recipe", "POV hook", "Behind the scenes", "Announcement", "Static graphic"];
 const URL_ = Deno.env.get("SUPABASE_URL")!;
 const ANON = Deno.env.get("SUPABASE_ANON_KEY")!;

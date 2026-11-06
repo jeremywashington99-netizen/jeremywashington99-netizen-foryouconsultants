@@ -448,10 +448,12 @@
   function buildDemo(now) {
     const t = now || Date.now();
     const series = {};
-    /* 26 weeks: 20 earlier weeks with a gentle climb, a repeating rhythm and ordinary noise,
-       then the original 6 recent weeks. Enough history for the accuracy test to run. */
+    /* 26 weeks of SAMPLE data. Engagement on every platform follows one consistent pattern, so the forecast
+       engine has something real to learn: a repeating ~7-week rhythm, a slow climb, a lift the week after each
+       paid boost, and small week-to-week noise (+/-0.1 points). The last 6 weeks include a viral reach week. */
     const EARLY = 20;
-    const mk = (base, grow, erSeq, reachBase, early) => {
+    const paidAt = i => (i % 6 === 3 ? 50 : 0);          /* a paid boost every 6 weeks */
+    const mk = (base, grow, reachBase, early) => {
       const s = emptySeries();
       for (let i = 0; i < EARLY + 6; i++) {
         const j = i - EARLY;                         /* j >= 0: the recent six weeks */
@@ -460,7 +462,7 @@
         const reach = j >= 0 ? Math.round(reachBase * (1 + 0.08 * j) * (j === 3 ? 1.6 : 1))
                              : Math.round(reachBase * (0.62 + 0.019 * i) * (1 + 0.05 * Math.sin(i)));
         const posts = j >= 0 ? [3, 4, 4, 5, 4, 5][j] : 3 + ((i * 5) % 3);
-        const er = j >= 0 ? erSeq[j] : +early(i).toFixed(1);
+        const er = +(early(i) + (i > 0 && paidAt(i - 1) > 0 ? 0.45 : 0)).toFixed(2);   /* lift the week after a paid boost */
         const engTotal = Math.round(reach * er / 100);
         const likes = Math.round(engTotal * 0.78), comments = Math.round(engTotal * 0.06);
         const shares = Math.round(engTotal * 0.06), saves = engTotal - likes - comments - shares;
@@ -468,13 +470,13 @@
         s.er.push(er); s.followers.push(fol); s.reach.push(reach);
         s.clicks.push(Math.round(reach * 0.012)); s.posts.push(posts);
         s.likes.push(likes); s.saves.push(Math.max(0, saves)); s.shares.push(shares); s.comments.push(comments);
-        s.paid.push(j === 4 ? 60 : (j < 0 && i % 9 === 4 ? 40 : 0));
+        s.paid.push(paidAt(i));
       }
       return s;
     };
-    const wob = i => ((i * 37) % 11 - 5) * 0.04;
-    series.tiktok = mk(3200, 180, [4.1, 4.6, 4.4, 6.2, 5.1, 5.4], 9000, i => 4.0 + 0.02 * i + 0.55 * Math.sin(i * 0.9) + wob(i));
-    series.instagram = mk(1850, 70, [3.2, 3.0, 3.6, 4.4, 3.9, 4.1], 2600, i => 3.0 + 0.02 * i + 0.4 * Math.sin(i * 0.9 + 1) + wob(i + 3));
+    const wob = i => ((i * 37) % 11 - 5) * 0.02;
+    series.tiktok = mk(3200, 180, 9000, i => 4.0 + 0.02 * i + 0.55 * Math.sin(i * 0.9) + wob(i));
+    series.instagram = mk(1850, 70, 2600, i => 3.0 + 0.02 * i + 0.45 * Math.sin(i * 0.9 + 1) + wob(i + 3));
 
     const P = (hoursAgo, platform, title, cls, reach, er, extra) => {
       const when = t - hoursAgo * 3600000;
@@ -522,7 +524,7 @@
       location: 'Sample', bio: 'Generated sample client for testing. Every figure is invented.',
       avatar: 'DM', color: '#9B7FE8', primary: 'tiktok', platforms: ['tiktok', 'instagram'],
       handles: { tiktok: 'demo_sample', instagram: 'demo_sample' }, profile_urls: {},
-      demographics: null, series: series, posts_log: posts, is_demo: true,
+      demographics: null, series: series, posts_log: posts, is_demo: true, demo_version: 2,
       created_at: iso(t)
     };
   }

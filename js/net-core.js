@@ -21,13 +21,24 @@
 })(typeof self !== 'undefined' ? self : this, function () {
   'use strict';
 
-  const FEATURE_VERSION = 4;   /* bump when the inputs change: older saved models would read them wrongly.
-                                 v4 = FROZEN fixed transforms (fy_features_v1): nothing is fitted to data, ever. */
+  const FEATURE_VERSION = 5;   /* bump when the inputs change: older saved models would read them wrongly.
+                                 v4 = FROZEN fixed transforms (fy_features_v1): nothing is fitted to data, ever.
+                                 v5 = same frozen transforms, but the network predicts the CHANGE from this week
+                                      (next = this week + change) and sees the weekly rhythm (recent moves and
+                                      distance from the 6-week average). Fixed gain constants only, still never refit. */
+  const GAIN = 10;       /* fixed: one ER point near 4% is ~0.04 scaled units; x10 puts weekly moves on a 0-to-1 footing */
+  const SHORT = 4, LONG = 8;   /* fixed: weeks in the short and long recent averages (this week included) */
 
   /* ---- Frozen, deterministic transforms (identical to public.fy_scale in the database and FY.features in the page).
      Fixed constants only: the same raw value always maps to the same feature value, on every device, forever.
      The signed log compresses both tails, so a sudden audience gain or loss cannot dominate. ---- */
   const LN = Math.log;
+  /* regressor settings (fixed): learning rate, weight penalty, dropout, epochs, early-stop patience, members, member size */
+  let REG_LR = 0.01, REG_L2 = 0, REG_DROP = 0, REG_EPOCHS = 300, REG_PATIENCE = 80, ENSEMBLE = 5;
+  /* No weight penalty or dropout per member: early stopping on the held-back newest weeks plus averaging five
+     members does the regularising. Measured on the demo client over 25 runs: weeks studied 77-80% matched,
+     held-back weeks beat "same as last week". */
+  const H1 = 24, H2 = 12;
   const round6 = v => { const s = v < 0 ? -1 : 1; return s * Math.round(Math.abs(v) * 1e6 + 1e-9) / 1e6; };
   const slog = x => Math.sign(x) * LN(1 + Math.abs(x));
   const pos = x => Math.max(x, 0);
@@ -61,24 +72,44 @@
     minmax(a) { const lo = Stat.min(a), hi = Stat.max(a); return { lo: lo, hi: hi, norm: v => hi === lo ? 0.5 : (v - lo) / (hi - lo), denorm: v => v * (hi - lo) + lo }; }
   };
 
-  /* Feature vector for week i of a platform series: 7 inputs from FIXED transforms.
-     Each input depends only on week i and the two weeks before it, so no future week can leak in
+  /* Feature vector for week i of a platform series: 9 inputs from FIXED transforms.
+     Each input depends only on week i and the weeks before it, so no future week can leak in
      (guardrail 5), and adding new weeks never changes the inputs of an old week. The norms argument
-     is kept for the callers' signature; the frozen scalers are always used. */
+     is kept for the callers' signature; the frozen scalers are always used.
+       0  this week's engagement (frozen log scale)
+       1  last move: this week minus last week          (x GAIN, squashed by tanh into -0.5..0.5)
+       2  the move before that                          (same)
+       3  distance from the 4-week average              (same)  -> together with 4, the weekly rhythm:
+       4  distance from the 8-week average              (same)     rises that fall back, dips that recover
+       5  follower growth this week, %                  (frozen pct_change scale)
+       6  posts this week                               (frozen count scale)
+       7  paid promotion this week                      (0 / 1)
+       8  saves per person reached                      (frozen rate scale) */
+  const squash = v => round6(0.5 * Math.tanh(GAIN * v));
+  function erAt(s, j) { return scale('engagement_rate', s.er[Math.max(0, j)]); }
   function features(s, i, norms) {
-    const prevER = i > 0 ? s.er[i - 1] : s.er[0];
-    const prevER2 = i > 1 ? s.er[i - 2] : prevER;
+    const e0 = erAt(s, i), e1 = erAt(s, i - 1), e2 = erAt(s, i - 2);
+    const avg = w => { let sum = 0, n = 0; for (let j = Math.max(0, i - w + 1); j <= i; j++) { sum += erAt(s, j); n++; } return sum / n; };
+    const f0 = Number(s.followers[i]) || 0, fp = i > 0 ? (Number(s.followers[i - 1]) || 0) : f0;
+    const growth = fp > 0 ? 100 * (f0 - fp) / fp : 0;
     const reach = (s.reach || [])[i] || 0, saves = (s.saves || [])[i] || 0;
     return [
-      scale('engagement_rate', s.er[i]),
-      scale('engagement_rate', prevER),
-      scale('engagement_rate', prevER2),
-      scale('followers', s.followers[i]),
+      e0,
+      squash(e0 - e1),
+      squash(e1 - e2),
+      squash(e0 - avg(SHORT)),
+      squash(e0 - avg(LONG)),
+      Math.max(-0.5, Math.min(1.5, scale('pct_change', growth))),   /* fixed clamp: a freak week cannot swamp the rest */
       scale('count_small', (s.posts || [])[i] || 0),
       (s.paid || [])[i] > 0 ? 1 : 0,
       reach > 0 ? scale('rate', saves / reach) : 0
     ];
   }
+  const N_INPUTS = 9;
+  /* The network's output is the change from this week, in GAIN units. Turn it back into next week's level
+     (frozen scaled units): level = this week + change / GAIN. */
+  function decode(raw, f) { return f[0] + raw / GAIN; }
+  function target(s, i) { return GAIN * (erAt(s, i + 1) - erAt(s, i)); }
 
 
   function create(deps) {
@@ -86,20 +117,42 @@
     const rand = deps.rand || undefined;
 
     function needMlp() { if (!Mlp) throw new Error('net-core needs the mini-mlp trainer to train'); }
-    function buildRegressor() {
-      needMlp();
-      /* Small on purpose: a few dozen weekly examples cannot support a big network without it memorising them.
-         L2 weight penalty + 15% dropout + a modest learning rate keep it learning patterns. Hidden layers stay ReLU. */
-      return Mlp.create({ name: 'sequential_1', inputDim: 7, loss: 'mse', lr: 0.008,
-        layers: [{ name: 'dense_relu_24', units: 24, act: 'relu', init: 'he', l2: 0.004 },
-                 { name: 'dense_relu_12', units: 12, act: 'relu', init: 'he', l2: 0.004 },
+    function regSpec(k) {
+      /* Each member is small on purpose: a few dozen weekly examples cannot support a big network without it memorising them.
+         Early stopping keeps each one learning patterns; the penalty and dropout settings stay available. Hidden layers stay ReLU. */
+      return { name: 'sequential_1', inputDim: N_INPUTS, loss: 'mse', lr: REG_LR,
+        layers: [{ name: 'dense_relu_' + (H1 * k), units: H1 * k, act: 'relu', init: 'he', l2: REG_L2 },
+                 { name: 'dense_relu_' + (H2 * k), units: H2 * k, act: 'relu', init: 'he', l2: REG_L2 },
                  { name: 'linear_out', units: 1, act: 'linear', init: 'glorot' }],
-        dropout: { after: 0, rate: 0.15, name: 'dropout_15' } }, rand);
+        dropout: REG_DROP > 0 ? { after: 0, rate: REG_DROP, name: 'dropout_' + Math.round(REG_DROP * 100) } : undefined };
+    }
+    function buildRegressor() { needMlp(); return Mlp.create(regSpec(1), rand); }
+
+    /* k members -> one network with k times the hidden units: layer 1 side by side, layer 2 block-diagonal
+       (member j's units only see member j's layer-1 units), output weights divided by k. Exactly the average. */
+    function mergeEnsemble(members) {
+      const k = members.length;
+      if (k === 1) return members[0];
+      const big = Mlp.create(regSpec(k), rand);
+      const ws = members.map(m => m.getWeights());
+      const K0 = new Float64Array(N_INPUTS * H1 * k), B0 = new Float64Array(H1 * k);
+      const K1 = new Float64Array(H1 * k * H2 * k), B1 = new Float64Array(H2 * k);
+      const K2 = new Float64Array(H2 * k), B2 = new Float64Array(1);
+      ws.forEach((w, m) => {
+        for (let i = 0; i < N_INPUTS; i++) for (let j = 0; j < H1; j++) K0[i * H1 * k + m * H1 + j] = w[0][i * H1 + j];
+        for (let j = 0; j < H1; j++) B0[m * H1 + j] = w[1][j];
+        for (let i = 0; i < H1; i++) for (let j = 0; j < H2; j++) K1[(m * H1 + i) * H2 * k + m * H2 + j] = w[2][i * H2 + j];
+        for (let j = 0; j < H2; j++) B1[m * H2 + j] = w[3][j];
+        for (let i = 0; i < H2; i++) K2[m * H2 + i] = w[4][i] / k;
+        B2[0] += w[5][0] / k;
+      });
+      big.setWeights([K0, B0, K1, B1, K2, B2]);
+      return big;
     }
 
     function buildClassifier(nClasses) {
       needMlp();
-      return Mlp.create({ name: 'sequential_2', inputDim: 7, loss: 'cce', lr: 0.02,
+      return Mlp.create({ name: 'sequential_2', inputDim: N_INPUTS, loss: 'cce', lr: 0.02,
         layers: [{ name: 'clf_relu_24', units: 24, act: 'relu', init: 'he' },
                  { name: 'clf_relu_16', units: 16, act: 'relu', init: 'he' },
                  { name: 'softmax_out', units: nClasses, act: 'softmax', init: 'glorot' }] }, rand);
@@ -137,7 +190,7 @@
         /* supervised pairs: features(week i) -> engagement(week i+1) */
         for (let i = 0; i < s.er.length - 1; i++) {
           if (vs.bad[i] || vs.bad[i + 1]) continue;
-          const f = features(s, i, norms), y = norms.er.norm(s.er[i + 1]);
+          const f = features(s, i, norms), y = target(s, i);
           if (!f.every(Number.isFinite) || !Number.isFinite(y)) continue;
           X.push(f); Y.push([y]); TAG.push({ pk: pk, i: i });
         }
@@ -157,9 +210,9 @@
 
       if (X.length < 3) throw new Error('Not enough data to train');
 
-      const reg = doReg ? buildRegressor() : null;
       const clf = doClf ? buildClassifier(CLASSES.length) : null;
-      state.reg = reg; state.clf = clf;
+      state.clf = clf;
+      let reg = null;
 
       try {
         let holdErr = null, trainErr = null, holdN = 0;
@@ -173,42 +226,63 @@
         const recentIdx = []; if (emph) { const per = {}; TAG.forEach((t, k) => { (per[t.pk] = per[t.pk] || []).push(k); }); Object.keys(per).forEach(pk => per[pk].slice(-6).forEach(k => recentIdx.push(k))); }
         state.recencyWeighted = emph;
         const xs = X.concat(recentIdx.map(k => X[k])), ys = Y.concat(recentIdx.map(k => Y[k]));
-        const EPOCHS = X.length < 8 ? 300 : 220;
+        const EPOCHS = X.length < 8 ? 300 : REG_EPOCHS;
+
         /* guardrails 1 + 5: when there are enough examples, hold back the NEWEST weeks of each platform (never shuffled in) */
-        let bestVal = Infinity, sinceBest = 0, bestW = null;
-        const cb = (watchVal, record) => ((e, logs) => {
-          if (record !== false) state.lossHistory.push(logs.loss);     /* the curve shown/checked is the main learning run only */
-          if (watchVal && logs.val_loss != null) {                    /* early stopping, keeping the weights from the best held-back moment */
-            if (logs.val_loss < bestVal - 1e-6) { bestVal = logs.val_loss; sinceBest = 0; bestW = reg.getWeights(); }
-            else if (++sinceBest >= 50) reg.stopTraining = true;
-          }
-          if (onEpoch && e % 10 === 0) onEpoch(e, EPOCHS, logs.loss);
-          if (!Number.isFinite(logs.loss)) reg.stopTraining = true;   /* guardrail 7: halt if numbers go invalid */
-        });
-        const plainFit = () => reg.fit(xs, ys, { epochs: EPOCHS, batchSize: 8, shuffle: true, onEpochEnd: cb() });
+        let trIdx = null, hoIdx = null;
         if (G && X.length >= G.MIN_FOR_HOLDOUT) {
-          const trIdx = [], hoIdx = [];
+          const tr = [], ho = [];
           const byPk = {}; TAG.forEach((t, k) => { (byPk[t.pk] = byPk[t.pk] || []).push(k); });
           Object.keys(byPk).forEach(pk => {
             const ks = byPk[pk];
-            if (ks.length < G.MIN_FOR_HOLDOUT / 2) { ks.forEach(k => trIdx.push(k)); return; }
-            const sp = G.timeSplit(ks.length); sp.train.forEach(j => trIdx.push(ks[j])); sp.hold.forEach(j => hoIdx.push(ks[j]));
+            if (ks.length < G.MIN_FOR_HOLDOUT / 2) { ks.forEach(k => tr.push(k)); return; }
+            const sp = G.timeSplit(ks.length); sp.train.forEach(j => tr.push(ks[j])); sp.hold.forEach(j => ho.push(ks[j]));
           });
-          if (hoIdx.length >= 2 && trIdx.length >= 6) {
-            const holdSet = new Set(hoIdx), extra = recentIdx.filter(k => !holdSet.has(k));
-            const trW = trIdx.concat(extra);
+          if (ho.length >= 2 && tr.length >= 6) { trIdx = tr; hoIdx = ho; }
+        }
+        const trW = trIdx ? trIdx.concat(recentIdx.filter(k => hoIdx.indexOf(k) < 0)) : null;
+
+        /* An ensemble: ENSEMBLE small networks learn independently from different random starting points and the
+           forecast is their average. One network trained on a few dozen weeks lands somewhere different every time;
+           the average is steady from run to run and misses less. The members are merged into ONE network
+           (side-by-side hidden units, output averaged), which gives exactly the same numbers as averaging them. */
+        const members = [], memberHold = [], memberTrain = [];
+        for (let m = 0; m < ENSEMBLE; m++) {
+          const net = buildRegressor();
+          let bestVal = Infinity, sinceBest = 0, bestW = null;
+          const cb = (watchVal, record) => ((e, logs) => {
+            if (record !== false && m === 0) state.lossHistory.push(logs.loss);   /* the curve shown is the first member's main learning run */
+            if (watchVal && logs.val_loss != null) {                             /* early stopping, keeping the weights from the best held-back moment */
+              if (logs.val_loss < bestVal - 1e-6) { bestVal = logs.val_loss; sinceBest = 0; bestW = net.getWeights(); }
+              else if (++sinceBest >= REG_PATIENCE) net.stopTraining = true;
+            }
+            if (onEpoch && e % 10 === 0) onEpoch(m * EPOCHS + e, ENSEMBLE * EPOCHS, logs.loss);
+            if (!Number.isFinite(logs.loss)) { net.stopTraining = true; state.lossHistory.push(logs.loss); }   /* guardrail 7: halt if numbers go invalid */
+          });
+          if (trIdx) {
             const xT = trW.map(k => X[k]), yT = trW.map(k => Y[k]);
             const xH = hoIdx.map(k => X[k]), yH = hoIdx.map(k => Y[k]);
-            reg.fit(xT, yT, { epochs: EPOCHS, batchSize: 8, shuffle: true, validation: { X: xH, Y: yH }, onEpochEnd: cb(true) });
-            if (bestW) { reg.setWeights(bestW); bestW = null; }   /* roll back to the best held-back moment */
-            const pT = reg.predict(xT).map(r => r[0]), pH = reg.predict(xH).map(r => r[0]);
-            trainErr = Stat.mae(trW.map(k => Y[k][0]), pT); holdErr = Stat.mae(hoIdx.map(k => Y[k][0]), pH); holdN = hoIdx.length;
+            net.fit(xT, yT, { epochs: EPOCHS, batchSize: 8, shuffle: true, validation: { X: xH, Y: yH }, onEpochEnd: cb(true) });
+            if (bestW) net.setWeights(bestW);   /* roll back to the best held-back moment */
+            memberTrain.push(net.predict(xT).map((r, j) => decode(r[0], xT[j])));
+            memberHold.push(net.predict(xH).map((r, j) => decode(r[0], xH[j])));
             /* the honest numbers are measured; now let it also learn from the newest weeks */
-            reg.fit(xs, ys, { epochs: 10, batchSize: 8, shuffle: true, onEpochEnd: cb(false, false) });
-          } else plainFit();
-        } else plainFit();
-        bestW = null;
+            net.fit(xs, ys, { epochs: 10, batchSize: 8, shuffle: true, onEpochEnd: cb(false, false) });
+          } else net.fit(xs, ys, { epochs: EPOCHS, batchSize: 8, shuffle: true, onEpochEnd: cb() });
+          members.push(net);
+        }
         if (state.lossHistory.some(v => !Number.isFinite(v))) throw new Error('Learning broke down (invalid numbers appeared). Check the data for extreme values and retry.');
+        if (trIdx) {
+          const avgOf = rows => rows[0].map((_, j) => rows.reduce((t, r) => t + r[j], 0) / rows.length);
+          const lvl = ks => ks.map(k => decode(Y[k][0], X[k]));                 /* real next-week level, frozen units */
+          const pT = avgOf(memberTrain), pH = avgOf(memberHold);
+          trainErr = Stat.mae(lvl(trW), pT); holdErr = Stat.mae(lvl(hoIdx), pH); holdN = hoIdx.length;
+          state.holdLevels = { actual: lvl(hoIdx), predicted: pH, persist: hoIdx.map(k => X[k][0]) };
+        }
+        state.memberWeights = [].concat.apply([], members.map(m => m.getWeights()));
+        reg = mergeEnsemble(members);
+        state.reg = reg;
+        state.ensemble = ENSEMBLE;
         state.holdout = { holdErr: holdErr, trainErr: trainErr, holdN: holdN };
         }
 
@@ -218,19 +292,33 @@
 
         if (doReg) {
         /* Evaluate the regressor against real held values */
-        const pv = reg.predict(X).map(r => r[0]);
-        const av = Y.map(v => v[0]);
+        const pv = reg.predict(X).map((r, j) => decode(r[0], X[j]));     /* next week's level, frozen units */
+        const av = Y.map((v, j) => decode(v[0], X[j]));
         const m = state.metrics;
         m.mae = Stat.mae(av, pv);
         m.rmse = Stat.rmse(av, pv);
-        const my = Stat.mean(av);
-        let ssRes = 0, ssTot = 0;
-        for (let i = 0; i < av.length; i++) { ssRes += (av[i] - pv[i]) ** 2; ssTot += (av[i] - my) ** 2; }
-        m.r2 = ssTot === 0 ? 0 : 1 - ssRes / ssTot;
+        const r2Of = (a, p) => { const my = Stat.mean(a); let ssRes = 0, ssTot = 0;
+          for (let i = 0; i < a.length; i++) { ssRes += (a[i] - p[i]) ** 2; ssTot += (a[i] - my) ** 2; }
+          return ssTot === 0 ? 0 : 1 - ssRes / ssTot; };
+        m.r2_pooled = r2Of(av, pv);
+        /* Scored PER PLATFORM: each platform's ups and downs measured against its own average, so a platform that simply
+           runs higher than another earns nothing. The headline score is the LOWEST platform, the conservative one. */
+        const toER = v => +Math.max(0, FROZEN.er.denorm(v)).toFixed(2);
+        m.byPlatform = {}; const fitBy = {};
+        client.platforms.forEach(pk => {
+          const ks = []; TAG.forEach((t, k) => { if (t.pk === pk) ks.push(k); });
+          if (!ks.length) return;
+          const a = ks.map(k => av[k]), p = ks.map(k => pv[k]), s = client.series[pk];
+          m.byPlatform[pk] = { r2: ks.length >= 4 ? r2Of(a, p) : null, rows: ks.length, mae: Stat.mae(a, p) };
+          fitBy[pk] = { actual: a.map(toER), predicted: p.map(toER),
+                        labels: ks.map(k => { const i = TAG[k].i + 1; return s.dates && s.dates[i] ? String(s.dates[i]).slice(5, 10) : 'wk ' + (i + 1); }) };
+        });
+        const scored = Object.keys(m.byPlatform).map(pk => m.byPlatform[pk].r2).filter(v => v != null);
+        m.r2 = scored.length ? Math.min.apply(null, scored) : m.r2_pooled;
         m.epochs = state.lossHistory.length;
         m.rows = X.length;
         m.params = (reg ? reg.countParams() : 0) + (clf ? clf.countParams() : 0);
-        state.lastFit = { actual: av.map(v => +FROZEN.er.denorm(v).toFixed(2)), predicted: pv.map(v => +Math.max(0, FROZEN.er.denorm(v)).toFixed(2)), labels: av.map((_, i) => 's' + (i + 1)) };
+        state.lastFit = { actual: av.map(toER), predicted: pv.map(toER), labels: av.map((_, i) => 's' + (i + 1)), platforms: fitBy };
         }
 
         /* Softmax class scores per platform */
@@ -243,7 +331,7 @@
         try {
           if (G && doReg) {
             const primary = client.primary && client.series[client.primary] ? client.primary : client.platforms[0];
-            const health = G.weightsHealth(reg.getWeights());
+            const health = G.weightsHealth(state.memberWeights || reg.getWeights());   /* the members, not the merged copy's structural zeros */
             state.guard = G.audit({ history: state.lossHistory, trainErr: trainErr, holdErr: holdErr, holdN: holdN, r2: state.metrics.r2, rows: X.length,
               classCounts: XC.length >= 3 ? state.classCounts : null, dataIssues: dataIssues, leak: leak, health: health,
               drift: G.drift(client.series[primary]), adapted: state.recencyWeighted,
@@ -279,7 +367,7 @@
           saves: rep(s.saves, s.saves[s.saves.length - 1])
         }, i, norms);   /* step k looks at the week it just predicted, not always the last real one */
         const raw = state.reg.predict([f])[0][0];
-        const val = +Math.max(0, norms.er.denorm(raw)).toFixed(2);
+        const val = +Math.max(0, norms.er.denorm(decode(raw, f))).toFixed(2);
         out.push(val); er.push(val);
       }
       return out;
@@ -321,7 +409,7 @@
       };
     }
 
-    return { FEATURE_VERSION: FEATURE_VERSION, features: features, runRow: runRow, buildRegressor: buildRegressor, buildClassifier: buildClassifier,
+    return { FEATURE_VERSION: FEATURE_VERSION, features: features, decode: decode, runRow: runRow, buildRegressor: buildRegressor, mergeEnsemble: mergeEnsemble, buildClassifier: buildClassifier,
              train: train, forecast: forecast_, describe: describe, plainNorms: plainNorms, release: release };
   }
 
@@ -350,6 +438,6 @@
     return null;
   }
 
-  return { FEATURE_VERSION: FEATURE_VERSION, Stat: Stat, features: features, create: create, validateClient: validateClient,
+  return { FEATURE_VERSION: FEATURE_VERSION, Stat: Stat, features: features, decode: decode, target: target, GAIN: GAIN, N_INPUTS: N_INPUTS, create: create, validateClient: validateClient,
            FROZEN: FROZEN, scale: scale, slog: slog, missPoints: missPoints };
 });

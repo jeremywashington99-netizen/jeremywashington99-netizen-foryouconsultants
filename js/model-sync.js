@@ -157,8 +157,21 @@
       const a = X.activationPlain(l.activation);
       return '<tr><td>' + esc(p.stage) + '</td><td>' + esc(p.does) + '</td><td>' + esc(a.label) + ' &mdash; ' + esc(a.plain) + '</td><td style="font-family:monospace;font-size:11px;color:var(--text2)">' + esc(l.name) + ' &middot; ' + l.params + '</td></tr>';
     }).join('');
-    return '<div style="display:flex;align-items:baseline;gap:12px;flex-wrap:wrap"><div style="font-size:26px;font-weight:700;color:' + col + '">' + (sm.fitPct == null ? '' : sm.fitPct + '%') + '</div>' +
-      '<div><div style="font-weight:600">' + esc(sm.verdict) + '</div><div class="card-sub">' + esc(sm.line) + '</div></div></div>' +
+    const by = NET.metrics && NET.metrics.byPlatform;
+    const label = function (pk) { return (typeof PLATFORMS !== 'undefined' && PLATFORMS[pk]) ? PLATFORMS[pk].label : pk; };
+    const order = by ? Object.keys(by).sort(function (a, b) { const o = typeof PLATFORM_ORDER !== 'undefined' ? PLATFORM_ORDER : []; return (o.indexOf(a) + 99 * (o.indexOf(a) < 0)) - (o.indexOf(b) + 99 * (o.indexOf(b) < 0)); }) : [];
+    /* one score per platform, each against its own ups and downs */
+    const head = by && order.length
+      ? '<div class="card-sub" style="margin-bottom:6px">Scored separately for each platform. When replayed over weeks it had already seen, it matched:</div>' +
+        '<div style="display:flex;gap:22px;flex-wrap:wrap">' + order.map(function (pk) {
+          const ps = X.netSummary({ r2: by[pk].r2, rows: by[pk].rows });
+          const c2 = ps.fitPct == null ? 'var(--text2)' : ps.fitPct >= 75 ? 'var(--green)' : ps.fitPct >= 55 ? 'var(--amber)' : 'var(--red)';
+          return '<div><div style="font-size:26px;font-weight:700;color:' + c2 + '">' + (ps.fitPct == null ? '&ndash;' : ps.fitPct + '%') + '</div>' +
+            '<div style="font-weight:600">' + esc(label(pk)) + '</div><div class="card-sub">' + (ps.fitPct == null ? 'Needs 4 weeks to score' : esc(ps.verdict)) + ' &middot; ' + by[pk].rows + ' weeks</div></div>';
+        }).join('') + '</div>'
+      : '<div style="display:flex;align-items:baseline;gap:12px;flex-wrap:wrap"><div style="font-size:26px;font-weight:700;color:' + col + '">' + (sm.fitPct == null ? '' : sm.fitPct + '%') + '</div>' +
+        '<div><div style="font-weight:600">' + esc(sm.verdict) + '</div><div class="card-sub">' + esc(sm.line) + '</div></div></div>';
+    return head +
       '<p class="card-sub" style="margin:10px 0 4px">' + esc(sm.learnedFrom) + '</p>' +
       '<p class="card-sub" style="margin:0 0 6px">' + esc(sm.caveat) + '</p>' +
       (sm.weak ? '<div class="callout callout-warn" style="margin:8px 0">' + esc(sm.weak) + '</div>' : '') +

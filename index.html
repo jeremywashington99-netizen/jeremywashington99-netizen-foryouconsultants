@@ -360,11 +360,11 @@ code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;colo
       <form id="login-form">
         <div class="form-group">
           <label class="form-label">Email address</label>
-          <input id="login-email" class="form-input" type="email" autocomplete="username" placeholder="you@company.com"/>
+          <input id="login-email" class="form-input" type="email" autocomplete="username"/>
         </div>
         <div class="form-group">
           <label class="form-label">Password</label>
-          <input id="login-password" class="form-input" type="password" autocomplete="current-password" placeholder="Your password"/>
+          <input id="login-password" class="form-input" type="password" autocomplete="current-password"/>
         </div>
         <button id="login-btn" type="submit" class="btn-login">Sign in</button>
       </form>
@@ -424,7 +424,7 @@ code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;colo
         </div>
         <div class="form-group">
           <label class="form-label">Email address</label>
-          <input id="signup-email" class="form-input" type="email" autocomplete="username" placeholder="you@company.com"/>
+          <input id="signup-email" class="form-input" type="email" autocomplete="username"/>
         </div>
         <div class="form-group">
           <label class="form-label">Password</label>
@@ -645,10 +645,11 @@ code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;colo
         <div class="card" style="margin-bottom:14px">
           <div class="card-header"><div><div class="card-title">How the forecast engine works</div><div class="card-sub" id="net-status">Not trained</div></div></div>
           <div id="net-layers"></div>
-          <div class="grid-2" style="margin-top:14px;margin-bottom:0">
+          <div style="margin-top:14px">
             <div><div class="card-sub" style="margin-bottom:6px">How its accuracy improved while learning</div><div class="card-sub" style="margin-bottom:6px;font-size:11px">The line should fall and then flatten. Falling means it is getting better at matching your results.</div><div class="chart-wrap" style="height:150px"><canvas id="c-loss"></canvas></div></div>
-            <div><div class="card-sub" style="margin-bottom:6px">Forecast check: what it predicted vs what happened</div><div class="card-sub" style="margin-bottom:6px;font-size:11px">Green is what really happened. Gold is what the engine expected. The closer they sit, the more you can trust it.</div><div class="chart-wrap" style="height:150px"><canvas id="c-fit"></canvas></div></div>
+            <div style="margin-top:16px"><div class="card-sub" style="margin-bottom:6px">Forecast check, one graph per platform</div><div class="card-sub" style="margin-bottom:6px;font-size:11px">Green is what really happened. Gold is what the engine expected. The closer they sit, the more you can trust it. Each platform is scored against its own ups and downs.</div></div>
           </div>
+          <div id="fit-charts" class="grid-2" style="margin-top:6px;margin-bottom:0"></div>
         </div>
         <div id="dl-lab"></div>
         <div id="insights-container"></div>
@@ -1691,7 +1692,7 @@ const Stat = {
    model.getWeights() and rendered in the AI Insights view.
 ============================================================ */
 const NET = {
-  FEATURE_VERSION:4,   /* v4 = frozen fy_features_v1 transforms; must match js/net-core.js */
+  FEATURE_VERSION:5,   /* v5 = frozen fy_features_v1 transforms, change-from-this-week output, 5-network ensemble; must match js/net-core.js */
   reg:null, clf:null,
   lossHistory:[], trained:false, training:false,
   metrics:{ mae:0, rmse:0, r2:0, epochs:0, params:0, backend:'', rows:0 },
@@ -1736,7 +1737,7 @@ const NET = {
       const p=this.reg.predict(t);
       const raw=(await p.data())[0];
       t.dispose(); p.dispose();
-      const val=+Math.max(0, norms.er.denorm(raw)).toFixed(2);
+      const val=+Math.max(0, norms.er.denorm(FYNetCore.decode(raw, f))).toFixed(2);   /* output = change from this week */
       out.push(val); er.push(val);
     }
     return out;
@@ -1751,7 +1752,7 @@ const NET = {
     for(let i=0;i<s.er.length;i++) rows.push(this.features(s,i,norms));
     const t=tf.tensor2d(rows);
     const p=this.reg.predict(t);
-    const arr=Array.from(await p.data()).map(v=>+Math.max(0, norms.er.denorm(v)).toFixed(2));
+    const arr=Array.from(await p.data()).map((v,i)=>+Math.max(0, norms.er.denorm(FYNetCore.decode(v, rows[i]))).toFixed(2));
     t.dispose(); p.dispose();
     return arr;
   },
@@ -1792,6 +1793,27 @@ function mkChart(id,type,data,options){
   charts[id]=new Chart(el,{type,data,options});
 }
 function clearChart(id){ if (charts[id]){ try{ charts[id].destroy(); }catch(e){} delete charts[id]; } }
+
+/* Forecast check: one graph per platform, each with its own match score */
+function renderFitCharts(){
+  const box=document.getElementById('fit-charts'); if(!box) return;
+  Object.keys(charts).filter(k=>k.indexOf('c-fit-')===0).forEach(clearChart);
+  const lf=NET.lastFit||{}, by=lf.platforms||null, mb=(NET.metrics&&NET.metrics.byPlatform)||{};
+  if (!NET.trained || !by || !Object.keys(by).length){ box.innerHTML=NET.trained&&lf.actual&&lf.actual.length?'<div class="callout callout-info">This saved version predates per-platform scoring. Press <strong>Train Model</strong> to see one graph per platform.</div>':''; return; }
+  const keys=PLATFORM_ORDER.filter(pk=>by[pk]).concat(Object.keys(by).filter(pk=>PLATFORM_ORDER.indexOf(pk)<0));
+  box.innerHTML=keys.map(pk=>{
+    const p=PLATFORMS[pk]||{label:pk,color:'#9B7FE8'}, r=mb[pk]&&mb[pk].r2, pct=r==null?null:Math.round(Math.max(0,r)*100);
+    const col=pct==null?'var(--text2)':pct>=75?'var(--green)':pct>=55?'var(--amber)':'var(--red)';
+    return '<div><div style="display:flex;align-items:baseline;gap:8px;margin-bottom:4px"><span style="width:9px;height:9px;border-radius:50%;background:'+p.color+';display:inline-block"></span>'+
+      '<strong style="font-size:13px">'+esc(p.label)+'</strong><span style="font-weight:700;color:'+col+'">'+(pct==null?'not scored (fewer than 4 weeks)':pct+'% matched')+'</span></div>'+
+      '<div class="chart-wrap" style="height:150px"><canvas id="c-fit-'+esc(pk)+'"></canvas></div></div>';
+  }).join('');
+  keys.forEach(pk=>mkChart('c-fit-'+pk,'line',{labels:by[pk].labels,
+    datasets:[
+      {label:'Actual',data:by[pk].actual,borderColor:'#22C78A',backgroundColor:'transparent',tension:.3,pointRadius:3,borderWidth:2},
+      {label:'Predicted',data:by[pk].predicted,borderColor:'#C9A84C',backgroundColor:'transparent',tension:.3,pointRadius:3,borderWidth:2,borderDash:[4,3]}
+    ]}, baseOpts(v=>v.toFixed(2))));
+}
 const baseOpts=(cb)=>({
   responsive:true, maintainAspectRatio:false,
   plugins:{legend:{display:false}},
@@ -2400,13 +2422,7 @@ async function renderAI(){
     }, baseOpts(v=>v.toFixed(3)));
   } else clearChart('c-loss');
 
-  if (NET.lastFit.actual.length){
-    mkChart('c-fit','line',{labels:NET.lastFit.labels,
-      datasets:[
-        {label:'Actual',data:NET.lastFit.actual,borderColor:'#22C78A',backgroundColor:'transparent',tension:.3,pointRadius:3,borderWidth:2},
-        {label:'Predicted',data:NET.lastFit.predicted,borderColor:'#C9A84C',backgroundColor:'transparent',tension:.3,pointRadius:3,borderWidth:2,borderDash:[4,3]}
-      ]}, baseOpts(v=>v.toFixed(2)));
-  } else clearChart('c-fit');
+  renderFitCharts();
 
   const box=document.getElementById('insights-container');
   if (!c || !hasData(c)){
@@ -4445,7 +4461,7 @@ function plainLayer(l){
   if(a==='relu') return 'ReLU — passes positive signals, blocks negative ones. Finds the basic patterns in the inputs.';
   if(a==='tanh') return 'Tanh — squeezes values into −1 … +1 so no single input dominates.';
   if(a==='softsign') return 'Softsign — a gentler squeeze than Tanh; keeps small differences visible.';
-  if(a==='linear') return 'Linear — output layer for a continuous number. This is the predicted engagement rate, unbounded so it can move past old highs and lows.';
+  if(a==='linear') return 'Linear — output layer for a continuous number: the predicted change from this week, added to this week’s engagement rate. Five small networks learn side by side and this layer averages them.';
   if(a==='sigmoid') return 'Sigmoid — output squeezed into 0 … 1, used for yes / no and probability answers.';
   if(a==='softmax') return 'Softmax — turns the 6 content-type scores into probabilities that add up to 100%.';
   return l.name+' — '+l.activation;
@@ -4483,7 +4499,7 @@ function renderAIPlain(c){
     '<details class="plain-gloss"><summary>Glossary — the layer names in the table</summary>'+
     '<div><strong>ReLU</strong> blocks negatives · <strong>Tanh</strong> squeezes to −1…+1 · <strong>Softsign</strong> gentler squeeze · <strong>Sigmoid</strong> squeezes to 0–1 · '+
     '<strong>Softmax</strong> turns scores into percentages that sum to 100 · <strong>Weights</strong> = how strongly one signal influences the next · <strong>Biases</strong> = a baseline nudge · '+
-    '<strong>W 7 x 32</strong> = a grid of 7 inputs times 32 units · <strong>Dropout</strong> = random muting to prevent memorising. Hover any layer row for its meaning.</div></details>');
+    '<strong>W 9 x 120</strong> = a grid of 9 inputs times 120 units (five networks of 24 side by side, averaged) · <strong>Dropout</strong> = random muting to prevent memorising. Hover any layer row for its meaning.</div></details>');
 }
 
 function statPlain(kind,v){
@@ -4827,11 +4843,27 @@ async function confirmTemplateUpload(){
 async function ensureDemoClient(){
   if (!window.FY || !FY.session || typeof window.fyBuildDemo!=='function') return;
   const st=FY.state.current||{};
-  if (st.demoSeeded) return;
-  if (!DB.clients.some(c=>c.is_demo || String(c.id).indexOf('demo-sample-client')===0)){
+  if (st.demoSeeded && !DB.clients.some(c=>(c.is_demo || String(c.id).indexOf('demo-sample-client')===0) && (c.demo_version||1)<2)) return;
+  const old=DB.clients.find(c=>c.is_demo || String(c.id).indexOf('demo-sample-client')===0);
+  if (!old){
     const demo=window.fyBuildDemo(Date.now());
     await DB.save(demo);
     if (!DB.activeId) DB.activeId=demo.id;
+  } else if ((old.demo_version||1)<2){
+    /* sample data v2: every week follows one consistent pattern; same client id, so nothing else moves */
+    const demo=window.fyBuildDemo(Date.now()); demo.id=old.id;
+    await DB.save(demo);
+    /* keep the weekly-rows mirror (feature store) in step with the new sample weeks */
+    if (sb && SESSION && !LOCAL_MODE){
+      try{
+        await sb.from('metrics_weekly').delete().eq('client_id',demo.id);
+        const rows=[];
+        demo.platforms.forEach(pk=>{ const s=demo.series[pk]; s.dates.forEach((d,i)=>rows.push({client_id:demo.id,owner_id:SESSION.user.id,platform:pk,week_start:d,
+          followers:s.followers[i],reach:s.reach[i],engagement_rate:s.er[i],clicks:s.clicks[i]||0,posts:s.posts[i]||0,
+          likes:s.likes[i]||0,saves:s.saves[i]||0,shares:s.shares[i]||0,comments:s.comments[i]||0,source:'manual'})); });
+        await sb.from('metrics_weekly').upsert(rows,{onConflict:'client_id,platform,week_start'});
+      }catch(e){ console.warn('demo weekly rows not refreshed',e); }
+    }
   }
   FY.state.set({ demoSeeded:true });
 }

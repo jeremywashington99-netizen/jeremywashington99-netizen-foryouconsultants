@@ -183,9 +183,9 @@
         '<h1>Welcome back</h1><p class="sub">Sign in to your analytics dashboard</p>' +
         '<form id="fy-form" autocomplete="on">' +
         '<label for="fy-user">Username</label>' +
-        '<input id="fy-user" type="text" autocomplete="username" autocapitalize="none" spellcheck="false" required placeholder="J.washington@fouryouconsultants.com"/>' +
+        '<input id="fy-user" type="text" autocomplete="username" autocapitalize="none" spellcheck="false" required/>' +
         '<label for="fy-pass">Password</label><div class="pw">' +
-        '<input id="fy-pass" type="password" autocomplete="current-password" required placeholder="••••••••"/>' +
+        '<input id="fy-pass" type="password" autocomplete="current-password" required/>' +
         '<button type="button" id="fy-eye">Show</button></div>' +
         '<button class="go" id="fy-go" type="submit">Sign in securely</button></form>' +
         '<div class="msg" id="fy-msg"></div>');
