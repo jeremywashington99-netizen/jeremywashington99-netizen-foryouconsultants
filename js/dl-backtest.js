@@ -74,8 +74,49 @@
     const a = fastLevel(hist, h), b = dampedTrend(hist, h);
     return a.map(function (v, i) { return (v + b[i]) / 2; });
   }
+  /**
+   * Weekly rhythm: each week is predicted from the six weeks before it (an autoregression on the distance from the
+   * average, fitted by least squares with a small penalty), then rolled forward one week at a time. It can follow a
+   * repeating rise-and-fall that flat methods cannot. It only ever sees the weeks before the point being forecast,
+   * and it is chosen only when it beats the other methods on weeks it never saw.
+   */
+  function weeklyRhythm(hist, h) {
+    const n = hist.length, P = Math.min(6, Math.floor((n - 4) / 2));   /* needs about 2 weeks of history per week remembered */
+    if (P < 2) return recentMean(hist, h);
+    const mu = mean(hist), d = hist.map(function (v) { return v - mu; });
+    const A = [], b = [];
+    for (let i = 0; i < P; i++) { A.push(new Array(P).fill(0)); b.push(0); }
+    let rows = 0;
+    for (let t = P; t < n; t++) {
+      rows++;
+      for (let i = 0; i < P; i++) { b[i] += d[t - 1 - i] * d[t]; for (let j = 0; j < P; j++) A[i][j] += d[t - 1 - i] * d[t - 1 - j]; }
+    }
+    for (let i = 0; i < P; i++) A[i][i] += 0.02 * rows + 1e-9;           /* small fixed penalty keeps it steady */
+    const w = solve(A, b);
+    if (!w) return recentMean(hist, h);
+    const e = d.slice(), out = [], hi = 2 * Math.max.apply(null, hist);
+    for (let k = 0; k < h; k++) {
+      let v = 0; for (let i = 0; i < P; i++) v += w[i] * e[e.length - 1 - i];
+      const lvl = v + mu;
+      if (!isFinite(lvl) || lvl < 0 || lvl > hi) return recentMean(hist, h);   /* never let it run away */
+      out.push(lvl); e.push(v);
+    }
+    return out;
+  }
+  function solve(A, b) {
+    const p = b.length, M = A.map(function (r, i) { return r.concat([b[i]]); });
+    for (let c = 0; c < p; c++) {
+      let m = c; for (let r = c + 1; r < p; r++) if (Math.abs(M[r][c]) > Math.abs(M[m][c])) m = r;
+      const t = M[c]; M[c] = M[m]; M[m] = t;
+      if (Math.abs(M[c][c]) < 1e-12) return null;
+      for (let r = 0; r < p; r++) if (r !== c) { const f = M[r][c] / M[c][c]; for (let k = c; k <= p; k++) M[r][k] -= f * M[c][k]; }
+    }
+    return M.map(function (r, i) { return r[p] / r[i]; });
+  }
   const SIMPLE = { 'last week repeated': naive, 'recent average': recentMean, 'damped trend': dampedTrend,
-                   'fast-adapting level': fastLevel, 'since last shift': sinceShift, 'blend of level and trend': blend };
+                   'fast-adapting level': fastLevel, 'since last shift': sinceShift, 'blend of level and trend': blend,
+                   'weekly rhythm': weeklyRhythm };
+  const VERSION = 2;   /* v2 adds the weekly-rhythm method; forecasts saved by v1 are rebuilt */
 
   /** The standard error measures, all on weeks the method had not seen. */
   function metrics(pairs) {
@@ -215,7 +256,7 @@
     return { status: 'unreliable', label: 'Not reliable yet', tone: 'red', headline: 'Past tests were too far off to trust a number.', why: why.concat('Your results swing more than the pattern it can find. More weeks or steadier posting will help.'), verified: false, relMiss: r2(rel), miss4: miss4 };
   }
 
-  return { HORIZON: HORIZON, MIN_TRAIN: MIN_TRAIN, MIN_FOLDS: MIN_FOLDS, MAX_FOLDS: MAX_FOLDS, VERIFIED: VERIFIED, DIRECTIONAL: DIRECTIONAL,
+  return { VERSION: VERSION, weeklyRhythm: weeklyRhythm, HORIZON: HORIZON, MIN_TRAIN: MIN_TRAIN, MIN_FOLDS: MIN_FOLDS, MAX_FOLDS: MAX_FOLDS, VERIFIED: VERIFIED, DIRECTIONAL: DIRECTIONAL,
            shiftTest: shiftTest, fastLevel: fastLevel, sinceShift: sinceShift, blend: blend, metrics: metrics, skill: skill, assess: assess, SIMPLE: SIMPLE, naive: naive, recentMean: recentMean, dampedTrend: dampedTrend,
            run: run, choose: choose, bands: bands, verdict: verdict, quantile: quantile };
 });

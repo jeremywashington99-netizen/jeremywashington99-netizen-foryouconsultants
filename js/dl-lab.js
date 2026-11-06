@@ -95,7 +95,7 @@
   /* The accuracy evidence: standard error measures per method, and the plain assessment table. */
   function metricsHTML(r) {
     if (!r.metrics || !Object.keys(r.metrics).length) return '';
-    const names = { 'last week repeated': 'Last week repeated (baseline)', 'recent average': 'Recent average', 'damped trend': 'Damped trend', 'fast-adapting level': 'Fast-adapting level', 'since last shift': 'Level since last shift', 'blend of level and trend': 'Blend of level and trend', 'neural network': 'Neural network' };
+    const names = { 'last week repeated': 'Last week repeated (baseline)', 'recent average': 'Recent average', 'damped trend': 'Damped trend', 'fast-adapting level': 'Fast-adapting level', 'since last shift': 'Level since last shift', 'blend of level and trend': 'Blend of level and trend', 'weekly rhythm': 'Weekly rhythm (last 6 weeks)', 'neural network': 'Neural network' };
     const rows = Object.keys(r.metrics).map(function (k) {
       const m = r.metrics[k], win = k === r.method;
       return '<tr' + (win ? ' style="font-weight:600"' : '') + '><td>' + esc(names[k] || k) + (win ? ' &#10003; used' : '') + '</td><td>' + m.mae + '</td><td>' + m.rmse + '</td><td>' + m.mape + '%</td><td>' +
@@ -165,7 +165,9 @@
 
   const BT = window.FYBacktest;
   LAB.bt = {};
-  const METHOD_ORDER = ['last week repeated', 'recent average', 'damped trend', 'fast-adapting level', 'since last shift', 'blend of level and trend', 'neural network'];
+  const METHOD_ORDER = ['last week repeated', 'recent average', 'damped trend', 'fast-adapting level', 'since last shift', 'blend of level and trend', 'weekly rhythm', 'neural network'];
+  /* what the saved forecast was built from: if the weeks change, or the method list changes, it is rebuilt */
+  function dataSig(c, platforms) { return (platforms || []).map(function (pk) { const s = c.series[pk]; return pk + ':' + (s ? s.er.length + ':' + s.er.join(',') : ''); }).join('|'); }
 
   /* Walk-forward test of every method on each platform; picks the one with the smallest real miss. */
   async function runBacktests(c, t) {
@@ -213,7 +215,9 @@
     LAB.rnnTried[c.id] = true; LAB.rnnLoading = true; renderRNN();
     try {
       const r = await Store.latest(sb, c.id, 'rnn');
-      if (r.ok && r.run && r.run.weights && r.run.weights.model) {
+      const w0 = r.ok && r.run && r.run.weights;
+      const current = w0 && w0.btVersion === BT.VERSION && w0.dataSig === dataSig(c, w0.platforms);   /* stale or older method list: rebuild */
+      if (r.ok && r.run && r.run.weights && r.run.weights.model && current) {
         const w = r.run.weights;
         if (LAB.rnn) LAB.rnn.model.dispose();
         LAB.rnn = { model: await Store.restoreModel(tf, w.model), scalers: w.scalers, lookback: w.lookback, platforms: w.platforms,
@@ -244,7 +248,8 @@
       const weeks = Math.max.apply(null, t.platforms.map(function (pk) { return c.series[pk].er.length; }));
       setText('rnn-status', 'Saving to your database…');
       const wBlob = { model: await Store.serializeModel(tf, t.model), scalers: t.scalers, lookback: t.lookback, platforms: t.platforms,
-                      history: t.history, windows: t.windows, task: t.task, maeScaled: t.maeScaled, guard: LAB.rnnGuard, backtest: LAB.bt };
+                      history: t.history, windows: t.windows, task: t.task, maeScaled: t.maeScaled, guard: LAB.rnnGuard, backtest: LAB.bt,
+                      btVersion: BT.VERSION, dataSig: dataSig(c, t.platforms) };
       const saved = await Store.saveRun(sb, ownerId(), {
         client_id: c.id, kind: 'rnn', status: 'ok', model_name: 'weekly_forecast', backend: (tf.getBackend && tf.getBackend()) || null,
         epochs: t.history.length, loss_final: t.history.length ? t.history[t.history.length - 1] : null, mae: t.maeScaled,
